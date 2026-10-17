@@ -19,6 +19,7 @@ const PATHS = {
   layout2h: "M4 5h16v14H4zM4 12h16",
   layout4: "M4 5h16v14H4zM12 5v14M4 12h16",
   layoutCustom: "M4 5h16v14H4zM9.33 5v14M14.67 5v14M4 12h16",
+  layoutSnap: "M4 4h16v16H4zM11 4v16M11 12h9",
   jump: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM10 13h6M13 10l3 3-3 3",
   newTab: "M4 6h16v13H4zM4 10h16M12 13v4M10 15h4",
   grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",

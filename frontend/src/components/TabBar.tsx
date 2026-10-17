@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { serverColor } from "../format";
 import type { Server, Tab } from "../types";
-import { LAYOUTS, layoutDimensions, type LayoutKind } from "../layout";
+import { LAYOUTS, SNAP_LAYOUTS, layoutDimensions, type LayoutKind } from "../layout";
 import { Icon, type IconName } from "./Icon";
+import { SnapLayoutPicker } from "./SnapLayoutPicker";
 
 interface TabBarProps {
   tabs: Tab[];
@@ -10,7 +11,7 @@ interface TabBarProps {
   /** Tabs currently shown in one of the split panes. */
   visibleIds: Set<string>;
   layout: LayoutKind;
-  onLayout: (layout: LayoutKind) => void;
+  onLayout: (layout: LayoutKind, targetSlot?: number) => void;
   servers: Map<number, Server>;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
@@ -35,6 +36,7 @@ export function TabBar({
   onClose,
   onOpenPalette,
 }: TabBarProps) {
+  const [showSnapPicker, setShowSnapPicker] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const currentDims = layoutDimensions(layout);
@@ -42,7 +44,8 @@ export function TabBar({
   const [manualRows, setManualRows] = useState(currentDims.rows);
   const [manualCols, setManualCols] = useState(currentDims.cols);
 
-  const isPreset = LAYOUTS.some((item) => item.kind === layout);
+  const isStandardPreset = LAYOUTS.some((item) => item.kind === layout);
+  const isSnapPreset = SNAP_LAYOUTS.some((item) => item.kind === layout);
 
   useEffect(() => {
     setManualRows(currentDims.rows);
@@ -50,15 +53,17 @@ export function TabBar({
   }, [currentDims.rows, currentDims.cols]);
 
   useEffect(() => {
-    if (!showPicker) return;
+    if (!showPicker && !showSnapPicker) return;
     const onPointerDown = (e: PointerEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setShowPicker(false);
+        setShowSnapPicker(false);
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setShowPicker(false);
+        setShowSnapPicker(false);
       }
     };
     window.addEventListener("pointerdown", onPointerDown);
@@ -67,7 +72,7 @@ export function TabBar({
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [showPicker]);
+  }, [showPicker, showSnapPicker]);
 
   const displayRows = hoverDims ? hoverDims.rows : currentDims.rows;
   const displayCols = hoverDims ? hoverDims.cols : currentDims.cols;
@@ -110,6 +115,21 @@ export function TabBar({
         })}
       </div>
       <div className="layout-switch" role="radiogroup" aria-label="Tata letak terminal" ref={pickerRef}>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={isSnapPreset && !isStandardPreset}
+          className={`icon-btn snap-toggle-btn${(isSnapPreset && !isStandardPreset) || showSnapPicker ? " is-on" : ""}`}
+          onClick={() => {
+            setShowSnapPicker((v) => !v);
+            setShowPicker(false);
+          }}
+          title="Snap Layouts Windows (Alt+S)"
+          aria-label="Snap Layouts Windows"
+        >
+          <Icon name="layoutSnap" size={15} />
+        </button>
+
         {LAYOUTS.map((item) => (
           <button
             key={item.kind}
@@ -119,6 +139,7 @@ export function TabBar({
             className={`icon-btn${layout === item.kind ? " is-on" : ""}`}
             onClick={() => {
               setShowPicker(false);
+              setShowSnapPicker(false);
               onLayout(item.kind);
             }}
             title={item.label}
@@ -127,17 +148,36 @@ export function TabBar({
             <Icon name={`layout${item.kind}` as IconName} size={15} />
           </button>
         ))}
+
         <button
           type="button"
           role="radio"
-          aria-checked={!isPreset}
-          className={`icon-btn${!isPreset ? " is-on" : ""}${showPicker ? " is-active" : ""}`}
-          onClick={() => setShowPicker((v) => !v)}
-          title={`Kustom tata letak...${!isPreset ? ` (${currentDims.rows}×${currentDims.cols})` : ""}`}
+          aria-checked={!isStandardPreset && !isSnapPreset}
+          className={`icon-btn${!isStandardPreset && !isSnapPreset ? " is-on" : ""}${showPicker ? " is-active" : ""}`}
+          onClick={() => {
+            setShowPicker((v) => !v);
+            setShowSnapPicker(false);
+          }}
+          title={`Kustom tata letak...${!isStandardPreset && !isSnapPreset ? ` (${currentDims.rows}×${currentDims.cols})` : ""}`}
           aria-label="Kustom tata letak"
         >
           <Icon name="layoutCustom" size={15} />
         </button>
+
+        {showSnapPicker && (
+          <SnapLayoutPicker
+            currentLayout={layout}
+            onSelectSnap={(kind, slotIndex) => {
+              setShowSnapPicker(false);
+              onLayout(kind, slotIndex);
+            }}
+            onClose={() => setShowSnapPicker(false)}
+            onOpenCustomGrid={() => {
+              setShowSnapPicker(false);
+              setShowPicker(true);
+            }}
+          />
+        )}
 
         {showPicker && (
           <div className="grid-picker-popover" role="dialog" aria-label="Kustom tata letak terminal">
