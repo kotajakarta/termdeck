@@ -4,15 +4,14 @@ import { api, errorMessage, token } from "./api";
 import { serverColor } from "./format";
 import {
   activeTabId,
-  defaultTrackSizes,
   emptyPanes,
   focusSlot,
-  gridTemplateAreasFor,
-  layoutDimensions,
+  getLayoutDefinition,
   LAYOUTS,
   removeTab,
   resizeTrack,
   setLayout,
+  setLayoutWithSlot,
   showTab,
   type LayoutKind,
   type PaneState,
@@ -84,9 +83,9 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const selectedServer = selectedServerId !== null ? (serverMap.get(selectedServerId) ?? null) : null;
   const multiPane = panes.slots.length > 1;
-  const dims = layoutDimensions(panes.layout);
-  const [colSizes, setColSizes] = useState<number[]>(() => defaultTrackSizes(layoutDimensions(panes.layout).cols));
-  const [rowSizes, setRowSizes] = useState<number[]>(() => defaultTrackSizes(layoutDimensions(panes.layout).rows));
+  const layoutDef = getLayoutDefinition(panes.layout);
+  const [colSizes, setColSizes] = useState<number[]>(() => [...layoutDef.defaultCols]);
+  const [rowSizes, setRowSizes] = useState<number[]>(() => [...layoutDef.defaultRows]);
   const [dragging, setDragging] = useState<{
     type: "col" | "row";
     index: number;
@@ -95,8 +94,8 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
   } | null>(null);
   const panesContainerRef = useRef<HTMLDivElement>(null);
 
-  const effectiveCols = colSizes.length === dims.cols ? colSizes : defaultTrackSizes(dims.cols);
-  const effectiveRows = rowSizes.length === dims.rows ? rowSizes : defaultTrackSizes(dims.rows);
+  const effectiveCols = colSizes.length === layoutDef.cols ? colSizes : [...layoutDef.defaultCols];
+  const effectiveRows = rowSizes.length === layoutDef.rows ? rowSizes : [...layoutDef.defaultRows];
 
   const onStartColResize = (e: React.PointerEvent, index: number) => {
     e.preventDefault();
@@ -119,11 +118,11 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
   };
 
   const onResetColResize = () => {
-    setColSizes(defaultTrackSizes(dims.cols));
+    setColSizes([...layoutDef.defaultCols]);
   };
 
   const onResetRowResize = () => {
-    setRowSizes(defaultTrackSizes(dims.rows));
+    setRowSizes([...layoutDef.defaultRows]);
   };
 
   useEffect(() => {
@@ -231,11 +230,16 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
   );
 
   const changeLayout = useCallback(
-    (kind: LayoutKind) => {
-      setPanes((prev) => setLayout(prev, kind, tabs.map((t) => t.id)));
-      const nextDims = layoutDimensions(kind);
-      setColSizes(defaultTrackSizes(nextDims.cols));
-      setRowSizes(defaultTrackSizes(nextDims.rows));
+    (kind: LayoutKind, targetSlot?: number) => {
+      setPanes((prev) => {
+        if (targetSlot !== undefined) {
+          return setLayoutWithSlot(prev, kind, targetSlot, tabs.map((t) => t.id));
+        }
+        return setLayout(prev, kind, tabs.map((t) => t.id));
+      });
+      const def = getLayoutDefinition(kind);
+      setColSizes([...def.defaultCols]);
+      setRowSizes([...def.defaultRows]);
       writeString(LAYOUT_KEY, kind);
     },
     [tabs],
@@ -497,7 +501,7 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
               dragging ? (dragging.type === "col" ? " is-resizing" : " is-resizing is-resizing-h") : ""
             }`}
             style={{
-              gridTemplateAreas: gridTemplateAreasFor(dims.rows, dims.cols),
+              gridTemplateAreas: layoutDef.areas,
               gridTemplateColumns: effectiveCols.map((s) => `${s}%`).join(" "),
               gridTemplateRows: effectiveRows.map((s) => `${s}%`).join(" "),
             }}
@@ -584,8 +588,8 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
                 </section>
               );
             })}
-            {dims.cols > 1 &&
-              Array.from({ length: dims.cols - 1 }).map((_, i) => {
+            {layoutDef.cols > 1 &&
+              Array.from({ length: layoutDef.cols - 1 }).map((_, i) => {
                 let leftPct = 0;
                 for (let c = 0; c <= i; c++) leftPct += effectiveCols[c];
                 return (
@@ -600,8 +604,8 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
                 );
               })}
 
-            {dims.rows > 1 &&
-              Array.from({ length: dims.rows - 1 }).map((_, j) => {
+            {layoutDef.rows > 1 &&
+              Array.from({ length: layoutDef.rows - 1 }).map((_, j) => {
                 let topPct = 0;
                 for (let r = 0; r <= j; r++) topPct += effectiveRows[r];
                 return (
