@@ -130,3 +130,50 @@ test("custom layout 2x3 expands slots and preserves focused tab", () => {
   assert.equal(s.slots.length, 6);
 });
 
+test("Windows Snap Layout definitions: correctly exposes asymmetric and standard presets", async () => {
+  const { getLayoutDefinition, SNAP_LAYOUTS } = await import("../src/layout.ts");
+  assert.equal(SNAP_LAYOUTS.length, 9);
+
+  const leftTall = getLayoutDefinition("win-3-left-tall");
+  assert.equal(leftTall.slots, 3);
+  assert.equal(leftTall.cols, 2);
+  assert.equal(leftTall.rows, 2);
+  assert.equal(leftTall.areas, '"p0 p1" "p0 p2"');
+  assert.deepEqual(leftTall.defaultCols, [50, 50]);
+  assert.deepEqual(leftTall.defaultRows, [50, 50]);
+  assert.equal(leftTall.zones.length, 3);
+  assert.deepEqual(leftTall.zones[0], { slotIndex: 0, label: "Kiri Penuh", colStart: 1, colSpan: 1, rowStart: 1, rowSpan: 2 });
+
+  const leftWide = getLayoutDefinition("win-2-left-wide");
+  assert.equal(leftWide.slots, 2);
+  assert.deepEqual(leftWide.defaultCols, [67, 33]);
+
+  const rightTall = getLayoutDefinition("win-3-right-tall");
+  assert.equal(rightTall.areas, '"p0 p2" "p1 p2"');
+
+  const centerFocus = getLayoutDefinition("win-3-center-focus");
+  assert.deepEqual(centerFocus.defaultCols, [25, 50, 25]);
+});
+
+test("setLayoutWithSlot: puts active tab into specified target slot and updates focus", async () => {
+  const { setLayoutWithSlot } = await import("../src/layout.ts");
+  // Start with 1 tab 'tabA'
+  let s = emptyPanes("1");
+  s = showTab(s, "tabA");
+
+  // Snap to win-3-left-tall, clicking slot 1 (top-right zone)
+  s = setLayoutWithSlot(s, "win-3-left-tall", 1, ["tabA", "tabB", "tabC"]);
+  assert.equal(s.focused, 1);
+  assert.equal(s.slots[1], "tabA");
+  assert.equal(s.slots[0], "tabB");
+  assert.equal(s.slots[2], "tabC");
+  assert.equal(s.layout, "win-3-left-tall");
+
+  // Now click slot 0 with tabA focused
+  s = setLayoutWithSlot(s, "win-2-left-wide", 0, ["tabA", "tabB", "tabC"]);
+  assert.equal(s.focused, 0);
+  assert.equal(s.slots[0], "tabA");
+  assert.equal(s.slots[1], "tabB");
+});
+
+
