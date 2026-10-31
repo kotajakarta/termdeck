@@ -18,3 +18,5 @@ testokencf.txt
 .env.*
 .superpowers/
 docs/
+push.sh
+
