@@ -16,4 +16,5 @@ testokencf.txt
 *.token
 .env
 .env.*
-
+.superpowers/
+docs/
