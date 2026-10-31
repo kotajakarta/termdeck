@@ -41,6 +41,7 @@ interface SidebarProps {
   onAddBookmark: (server: Server) => void;
   onEditBookmark: (bookmark: Bookmark) => void;
   onDeleteBookmark: (bookmark: Bookmark) => void;
+  onOpenContainers?: (serverId: number) => void;
   /** New display order of all servers (full id list). */
   onReorder: (ids: number[]) => void;
 }
@@ -204,7 +205,7 @@ export function Sidebar(props: SidebarProps) {
                       aria-label={open ? "Tutup daftar path" : "Lihat daftar path"}
                       aria-expanded={open}
                     >
-                      <Icon name="chevron" size={12} />
+                      <Icon name="chevron" size={13} />
                     </button>
                     <button
                       type="button"
@@ -219,9 +220,12 @@ export function Sidebar(props: SidebarProps) {
                           moveByKeyboard(server.id, e.key === "ArrowUp" ? -1 : 1);
                         }
                       }}
-                      title="Klik untuk info, klik ganda untuk membuka terminal. Seret atau Alt+↑/↓ untuk memindah posisi."
+                      title={`${server.name} (${server.username}@${server.host}${server.port !== 22 ? `:${server.port}` : ""}) — Klik untuk info, klik ganda untuk buka terminal`}
                     >
                       <span className={`dot${liveServerIds.has(server.id) ? " is-live" : ""}`} />
+                      <span className="server-mini-icon" aria-hidden="true">
+                        <Icon name="server" size={16} />
+                      </span>
                       <span className="server-text">
                         <span className="server-name">{server.name}</span>
                         <span className="server-sub">
@@ -249,6 +253,20 @@ export function Sidebar(props: SidebarProps) {
                       >
                         <Icon name="plus" size={14} />
                       </button>
+                      {props.onOpenContainers && (
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            props.onOpenContainers?.(server.id);
+                          }}
+                          title="Buka Containers (Podman / Docker)"
+                          aria-label={`Buka containers di ${server.name}`}
+                        >
+                          <Icon name="box" size={14} />
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="icon-btn"
@@ -287,12 +305,16 @@ export function Sidebar(props: SidebarProps) {
                               openBookmarkIds.has(bm.id) ? `Lompat ke terminal ${bm.path}` : `Buka ${bm.path}`
                             }
                           >
-                            <Icon name="folder" size={14} />
+                            <span className="bookmark-icon-wrap">
+                              <span className="bookmark-icon">
+                                <Icon name="folder" size={14} />
+                              </span>
+                              {openBookmarkIds.has(bm.id) && <span className="open-dot" aria-label="Terbuka" />}
+                            </span>
                             <span className="bookmark-text">
                               <span className="bookmark-name">{bm.name}</span>
-                              <span className="bookmark-path">{bm.path}</span>
+                              <span className="bookmark-path" title={bm.path}>{bm.path}</span>
                             </span>
-                            {openBookmarkIds.has(bm.id) && <span className="open-dot" aria-label="Terbuka" />}
                           </button>
                           <span className="row-actions">
                             <button
@@ -302,7 +324,7 @@ export function Sidebar(props: SidebarProps) {
                               aria-label={`Buka ${bm.name} di tab baru`}
                               title="Buka di tab baru"
                             >
-                              <Icon name="newTab" size={13} />
+                              <Icon name="newTab" size={14} />
                             </button>
                             <button
                               type="button"
@@ -311,7 +333,7 @@ export function Sidebar(props: SidebarProps) {
                               aria-label={`Ubah path ${bm.name}`}
                               title="Ubah path"
                             >
-                              <Icon name="edit" size={13} />
+                              <Icon name="edit" size={14} />
                             </button>
                             <button
                               type="button"
@@ -320,7 +342,7 @@ export function Sidebar(props: SidebarProps) {
                               aria-label={`Hapus path ${bm.name}`}
                               title="Hapus path"
                             >
-                              <Icon name="trash" size={13} />
+                              <Icon name="trash" size={14} />
                             </button>
                           </span>
                         </li>
@@ -328,7 +350,7 @@ export function Sidebar(props: SidebarProps) {
                       {own.length === 0 && (
                         <li>
                           <button type="button" className="add-path" onClick={() => props.onAddBookmark(server)}>
-                            <Icon name="plus" size={13} /> Simpan path pertama
+                            <Icon name="plus" size={14} /> Simpan path pertama
                           </button>
                         </li>
                       )}

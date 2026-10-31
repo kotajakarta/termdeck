@@ -38,7 +38,7 @@ export function Snippets({ snippets, canRun, onRun, onChanged }: SnippetsProps) 
           title={collapsed ? "Tampilkan snippets" : "Sembunyikan snippets"}
         >
           <span className={`chev-icon${collapsed ? "" : " is-open"}`}>
-            <Icon name="chevron" size={12} />
+            <Icon name="chevron" size={13} />
           </span>
           <h3>
             Snippets{collapsed && snippets.length > 0 ? ` (${snippets.length})` : ""}
@@ -61,12 +61,12 @@ export function Snippets({ snippets, canRun, onRun, onChanged }: SnippetsProps) 
               onClick={() => onRun(s)}
               title={canRun ? `Kirim ke panel aktif: ${s.command}` : "Buka terminal dulu untuk menjalankan snippet"}
             >
-              <Icon name="bolt" size={13} />
+              <Icon name="bolt" size={14} />
               <span className="snippet-name">{s.name}</span>
             </button>
             <span className="row-actions">
               <button type="button" className="icon-btn" onClick={() => setEditing(s)} aria-label={`Ubah snippet ${s.name}`}>
-                <Icon name="edit" size={13} />
+                <Icon name="edit" size={14} />
               </button>
               <button
                 type="button"
@@ -74,7 +74,7 @@ export function Snippets({ snippets, canRun, onRun, onChanged }: SnippetsProps) 
                 onClick={() => void remove(s)}
                 aria-label={`Hapus snippet ${s.name}`}
               >
-                <Icon name="trash" size={13} />
+                <Icon name="trash" size={14} />
               </button>
             </span>
           </li>

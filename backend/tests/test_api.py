@@ -63,6 +63,19 @@ def test_lock_ends_all_sessions(client: TestClient) -> None:
     assert client.get("/api/servers").status_code == 200
 
 
+def test_lock_all_with_token_only(client: TestClient) -> None:
+    """The desktop tray icon locks TermDeck without a PIN session (like Android's notification)."""
+    assert client.post("/api/auth/lock-all", headers={"X-Token": "wrong", "X-Session": ""}).status_code == 401
+    assert client.get("/api/servers").status_code == 200
+    assert client.post("/api/auth/lock-all", headers={"X-Session": ""}).status_code == 204
+    assert client.get("/api/servers").status_code == 401
+    assert client.get("/api/auth/status").json() == {"unlocked": False, "session_valid": False}
+    # Locking an already locked vault is harmless.
+    assert client.post("/api/auth/lock-all", headers={"X-Session": ""}).status_code == 204
+    client.headers["X-Session"] = _login(client)
+    assert client.get("/api/servers").status_code == 200
+
+
 def test_change_pin_via_api(client: TestClient) -> None:
     bad = client.post("/api/auth/change-pin", json={"old_pin": "1111", "new_pin": "123456"})
     assert bad.status_code == 403
@@ -120,6 +133,18 @@ def test_snippet_crud_via_api(client: TestClient) -> None:
     sn = client.post("/api/snippets", json={"name": "pull", "command": "git pull"}).json()
     assert client.get("/api/snippets").json() == [sn]
     assert client.delete(f"/api/snippets/{sn['id']}").status_code == 204
+
+
+def test_paste_image_validation(client: TestClient) -> None:
+    srv = client.post("/api/servers", json=SERVER).json()
+    url = f"/api/servers/{srv['id']}/paste-image"
+    headers = {"Content-Type": "image/png"}
+    not_image = client.post(url, content=b"just text", headers=headers)
+    assert not_image.status_code == 415
+    huge = client.post(url, content=b"\x89PNG\r\n\x1a\n" + bytes(20 * 1024 * 1024), headers=headers)
+    assert huge.status_code == 413
+    assert client.post("/api/servers/999/paste-image", content=b"x", headers=headers).status_code == 404
+    assert client.post(url, content=b"x", headers={**headers, "X-Session": ""}).status_code == 401
 
 
 def test_ws_rejects_bad_token(client: TestClient) -> None:

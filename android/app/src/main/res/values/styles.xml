@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TermDeck" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">#131a18</item>
+        <item name="android:navigationBarColor">#131a18</item>
+        <item name="android:windowBackground">#18211f</item>
+    </style>
+</resources>

@@ -1,18 +1,31 @@
 import asyncio
 import posixpath
+import secrets
 import shlex
 import stat
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import asyncssh
 
 from .db import Store
-from .schemas import DirEntry, DirListing, ServerSecrets, ServerStats
+from .schemas import DirEntry, DirListing, FileActionOut, FileContentOut, ServerSecrets, ServerStats
 
 # Idle connections (no open terminal) are kept this long so sidebar polling
 # and path browsing do not reconnect on every request.
 IDLE_CLOSE_SECONDS = 90.0
 CONNECT_TIMEOUT_SECONDS = 15.0
+
+# Images pasted into a terminal are uploaded here (relative to the remote home)
+# so CLI tools running on the server can read them by path.
+PASTE_DIR = ".cache/termdeck/paste"
+MAX_PASTE_BYTES = 20 * 1024 * 1024
+MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
+# Pastes are single-use: older ones are deleted on the next paste. The grace
+# period keeps every image of a prompt that is still being written, since some
+# CLIs only read @path references when the prompt is submitted.
+PASTE_KEEP_SECONDS = 10 * 60
 
 STATS_SCRIPT = """\
 echo '@@hostname'; hostname 2>/dev/null || cat /etc/hostname 2>/dev/null
@@ -62,6 +75,38 @@ def build_cd_command(path: str, startup: str | None) -> str:
     if startup and startup.strip():
         command += f" && {startup.strip()}"
     return command
+
+
+def sniff_image_type(data: bytes) -> str | None:
+    """File extension for the image formats AI CLIs accept, detected from magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def paste_image_name(ext: str, now: datetime | None = None) -> str:
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return f"paste-{stamp}-{secrets.token_hex(3)}.{ext}"
+
+
+def format_octal_perm(permissions: int | None) -> str:
+    if permissions is None:
+        return ""
+    perm = permissions & 0o777
+    return f"0{perm:03o}"
+
+
+def parse_octal_mode(mode: str) -> int:
+    trimmed = mode.strip()
+    if not (3 <= len(trimmed) <= 4 and all(ch in "01234567" for ch in trimmed)):
+        raise ValueError("Mode izin harus angka oktal 3-4 digit (contoh: 0755 atau 644).")
+    return int(trimmed, 8)
 
 
 def _to_int(value: str) -> int | None:
@@ -271,6 +316,198 @@ class ConnectionPool:
         listing.entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
         return listing
 
+    async def upload_paste(self, server_id: int, data: bytes, ext: str) -> str:
+        """Store a pasted image on the server and return its absolute path."""
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    folder = posixpath.join(await sftp.realpath("."), PASTE_DIR)
+                    await sftp.makedirs(folder, attrs=asyncssh.SFTPAttrs(permissions=0o700), exist_ok=True)
+                    path = posixpath.join(folder, paste_image_name(ext))
+                    async with sftp.open(path, "xb", attrs=asyncssh.SFTPAttrs(permissions=0o600)) as file:
+                        await file.write(data)
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal menyimpan gambar di server: {exc.reason}") from exc
+                await self._remove_old_pastes(sftp, folder, path)
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini, gambar tidak bisa dikirim.") from exc
+        finally:
+            await self.release(server_id)
+        return path
+
+    @staticmethod
+    async def _resolve_sftp_path(sftp: asyncssh.SFTPClient, raw_path: str) -> str:
+        trimmed = raw_path.strip()
+        if not trimmed:
+            raise ValueError("Path wajib diisi.")
+        if trimmed in ("~",) or trimmed.startswith("~/"):
+            home = str(await sftp.realpath("."))
+            return home if trimmed == "~" else posixpath.join(home, trimmed[2:])
+        return trimmed
+
+    async def read_file(self, server_id: int, path: str) -> FileContentOut:
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, path)
+                    attrs = await sftp.stat(target)
+                    if attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY or (
+                        attrs.permissions is not None and stat.S_ISDIR(attrs.permissions)
+                    ):
+                        raise RemotePathError("Tidak bisa membaca folder sebagai file teks.")
+                    size = int(attrs.size or 0)
+                    if size > MAX_TEXT_FILE_BYTES:
+                        raise RemotePathError("Ukuran file terlalu besar untuk editor teks (maks 2 MB).")
+                    async with sftp.open(target, "rb") as file:
+                        data = await file.read()
+                    content = data.decode("utf-8", errors="replace")
+                    return FileContentOut(
+                        path=str(target),
+                        content=content,
+                        size=size,
+                        mtime=int(attrs.mtime) if attrs.mtime is not None else None,
+                        mode=format_octal_perm(attrs.permissions) or "0644",
+                    )
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal membaca file {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def write_file(self, server_id: int, path: str, content: str) -> FileActionOut:
+        raw = content.encode("utf-8")
+        if len(raw) > MAX_TEXT_FILE_BYTES:
+            raise ValueError("Konten terlalu besar (maks 2 MB).")
+        res = await self.upload_file(server_id, path, raw)
+        return FileActionOut(path=res.path, message="File berhasil disimpan")
+
+    async def mkdir(self, server_id: int, path: str) -> FileActionOut:
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, path)
+                    await sftp.makedirs(target, exist_ok=True)
+                    return FileActionOut(path=str(target), message="Folder berhasil dibuat")
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal membuat folder {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def rename_file(self, server_id: int, old_path: str, new_path: str) -> FileActionOut:
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    src = await self._resolve_sftp_path(sftp, old_path)
+                    dst = await self._resolve_sftp_path(sftp, new_path)
+                    await sftp.rename(src, dst)
+                    return FileActionOut(path=str(dst), message="Berhasil mengubah nama / memindahkan")
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal memindahkan {old_path} ke {new_path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def chmod_file(self, server_id: int, path: str, mode: str) -> FileActionOut:
+        perms = parse_octal_mode(mode)
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, path)
+                    await sftp.chmod(target, perms)
+                    return FileActionOut(path=str(target), message=f"Izin file diubah ke {format_octal_perm(perms)}")
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal mengubah izin {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def delete_file(self, server_id: int, path: str) -> None:
+        trimmed = path.strip()
+        if not trimmed or trimmed == "/":
+            raise ValueError("Tidak diizinkan menghapus root directory.")
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, trimmed)
+                    if target == "/":
+                        raise ValueError("Tidak diizinkan menghapus root directory.")
+                    if await sftp.isdir(target) and not await sftp.islink(target):
+                        await sftp.rmtree(target)
+                    else:
+                        await sftp.remove(target)
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal menghapus {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def upload_file(self, server_id: int, path: str, data: bytes) -> FileActionOut:
+        if len(data) > MAX_UPLOAD_FILE_BYTES:
+            raise ValueError("Ukuran file melebihi batas 50 MB.")
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, path)
+                    async with sftp.open(target, "wb") as file:
+                        await file.write(data)
+                    return FileActionOut(path=str(target), message="File berhasil diunggah")
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal menulis file {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    async def download_file(self, server_id: int, path: str) -> bytes:
+        conn = await self.acquire(server_id)
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    target = await self._resolve_sftp_path(sftp, path)
+                    attrs = await sftp.stat(target)
+                    if attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY or (
+                        attrs.permissions is not None and stat.S_ISDIR(attrs.permissions)
+                    ):
+                        raise RemotePathError("Tidak bisa mengunduh folder secara langsung.")
+                    if (attrs.size or 0) > MAX_UPLOAD_FILE_BYTES:
+                        raise RemotePathError("Ukuran file terlalu besar untuk diunduh langsung (maks 50 MB).")
+                    async with sftp.open(target, "rb") as file:
+                        return await file.read()
+                except asyncssh.SFTPError as exc:
+                    raise RemotePathError(f"Gagal mengunduh {path}: {exc.reason}") from exc
+        except asyncssh.ChannelOpenError as exc:
+            raise RemotePathError("SFTP tidak aktif di server ini.") from exc
+        finally:
+            await self.release(server_id)
+
+    @staticmethod
+    async def _remove_old_pastes(sftp: asyncssh.SFTPClient, folder: str, newest: str) -> None:
+        """Best effort; the age is measured against the new file so client/server clock skew does not matter."""
+        try:
+            now = (await sftp.stat(newest)).mtime
+            if now is None:
+                return
+            for item in await sftp.readdir(folder):
+                name = str(item.filename)
+                mtime = item.attrs.mtime
+                if name.startswith("paste-") and mtime is not None and now - mtime > PASTE_KEEP_SECONDS:
+                    await sftp.remove(posixpath.join(folder, name))
+        except asyncssh.SFTPError:
+            pass
+
     @staticmethod
     async def _listdir_sftp(conn: asyncssh.SSHClientConnection, path: str) -> DirListing:
         async with conn.start_sftp_client() as sftp:
@@ -292,15 +529,26 @@ class ConnectionPool:
                 if name in (".", ".."):
                     continue
                 full = posixpath.join(target, name)
+                is_symlink = item.attrs.type == asyncssh.FILEXFER_TYPE_SYMLINK
                 is_dir = item.attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY or (
                     item.attrs.permissions is not None and stat.S_ISDIR(item.attrs.permissions)
                 )
-                if item.attrs.type == asyncssh.FILEXFER_TYPE_SYMLINK:
+                if is_symlink:
                     try:
                         is_dir = await sftp.isdir(full)
                     except (asyncssh.SFTPError, OSError):
                         is_dir = False
-                entries.append(DirEntry(name=name, path=full, is_dir=is_dir))
+                entries.append(
+                    DirEntry(
+                        name=name,
+                        path=full,
+                        is_dir=is_dir,
+                        size=int(item.attrs.size or 0),
+                        mtime=int(item.attrs.mtime) if item.attrs.mtime is not None else None,
+                        mode=format_octal_perm(item.attrs.permissions),
+                        is_symlink=is_symlink,
+                    )
+                )
         return DirListing(path=str(target), entries=entries)
 
     @staticmethod

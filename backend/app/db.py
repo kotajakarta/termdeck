@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS snippets (
     command TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS cf_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    account_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 Row = sqlcipher.Row
@@ -313,3 +321,84 @@ class Store:
 
     def delete_snippet(self, snippet_id: int) -> bool:
         return self._exec("DELETE FROM snippets WHERE id = ?", (snippet_id,)).rowcount > 0
+
+    # ---- cf_accounts (Cloudflare) --------------------------------------
+
+    @staticmethod
+    def _mask_token(token: str) -> str:
+        if len(token) <= 10:
+            return "******"
+        return f"{token[:5]}...{token[-4:]}"
+
+    def list_cf_accounts(self) -> list[dict[str, Any]]:
+        rows = self._query("SELECT id, name, token, account_id, account_name, created_at FROM cf_accounts ORDER BY id ASC")
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "token_masked": self._mask_token(r["token"]),
+                "account_id": r["account_id"],
+                "account_name": r["account_name"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def get_cf_account(self, account_id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT id, name, token, account_id, account_name, created_at FROM cf_accounts WHERE id = ?", (account_id,))
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "id": r["id"],
+            "name": r["name"],
+            "token": r["token"],
+            "token_masked": self._mask_token(r["token"]),
+            "account_id": r["account_id"],
+            "account_name": r["account_name"],
+            "created_at": r["created_at"],
+        }
+
+    def create_cf_account(self, name: str, token: str, account_id: str, account_name: str = "") -> dict[str, Any]:
+        cur = self._exec(
+            "INSERT INTO cf_accounts (name, token, account_id, account_name) VALUES (?, ?, ?, ?)",
+            (name, token, account_id, account_name),
+        )
+        created = self.get_cf_account(int(cur.lastrowid or 0))
+        assert created is not None
+        return created
+
+    def update_cf_account(
+        self,
+        id: int,
+        name: str,
+        token: str | None = None,
+        account_id: str | None = None,
+        account_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        existing = self.get_cf_account(id)
+        if not existing:
+            return None
+
+        clean_token = token.strip() if token is not None else ""
+        if clean_token:
+            self._exec(
+                "UPDATE cf_accounts SET name = ?, token = ?, account_id = ?, account_name = ? WHERE id = ?",
+                (
+                    name.strip(),
+                    clean_token,
+                    account_id.strip() if account_id else existing["account_id"],
+                    account_name.strip() if account_name is not None else existing["account_name"],
+                    id,
+                ),
+            )
+        else:
+            self._exec(
+                "UPDATE cf_accounts SET name = ? WHERE id = ?",
+                (name.strip(), id),
+            )
+        return self.get_cf_account(id)
+
+    def delete_cf_account(self, account_id: int) -> bool:
+        return self._exec("DELETE FROM cf_accounts WHERE id = ?", (account_id,)).rowcount > 0
+

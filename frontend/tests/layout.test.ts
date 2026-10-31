@@ -176,4 +176,48 @@ test("setLayoutWithSlot: puts active tab into specified target slot and updates 
   assert.equal(s.slots[1], "tabB");
 });
 
+test("clampFontSize and stepFontSize enforce terminal font size bounds (8..28)", async () => {
+  const { DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE, clampFontSize, stepFontSize } = await import(
+    "../src/layout.ts"
+  );
+  assert.equal(DEFAULT_FONT_SIZE, 14);
+  assert.equal(MIN_FONT_SIZE, 8);
+  assert.equal(MAX_FONT_SIZE, 28);
+
+  assert.equal(clampFontSize(14), 14);
+  assert.equal(clampFontSize(4), 8);
+  assert.equal(clampFontSize(40), 28);
+  assert.equal(clampFontSize(NaN), 14);
+
+  assert.equal(stepFontSize(14, -1), 13);
+  assert.equal(stepFontSize(14, 1), 15);
+  assert.equal(stepFontSize(8, -1), 8);
+  assert.equal(stepFontSize(28, 1), 28);
+});
+
+test("rankFrequentBookmarks sorts bookmarks by usage count descending and preserves fallback order", async () => {
+  const { recordBookmarkUse, rankFrequentBookmarks } = await import("../src/layout.ts");
+  const bms = [
+    { id: 1, server_id: 1, name: "alpha", path: "/var/alpha", startup_cmd: "" },
+    { id: 2, server_id: 1, name: "beta", path: "/var/beta", startup_cmd: "" },
+    { id: 3, server_id: 1, name: "gamma", path: "/var/gamma", startup_cmd: "" },
+  ];
+
+  let usage: Record<number, { count: number; lastUsed: number }> = {};
+  usage = recordBookmarkUse(usage, 2, 100);
+  usage = recordBookmarkUse(usage, 2, 200);
+  usage = recordBookmarkUse(usage, 3, 300);
+
+  const ranked = rankFrequentBookmarks(bms, usage);
+  assert.deepEqual(
+    ranked.map((b) => b.id),
+    [2, 3, 1],
+  );
+  assert.equal(ranked[0].useCount, 2);
+  assert.equal(ranked[1].useCount, 1);
+  assert.equal(ranked[2].useCount, 0);
+});
+
+
+
 

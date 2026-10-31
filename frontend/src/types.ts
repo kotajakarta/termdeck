@@ -46,15 +46,166 @@ export interface Snippet {
 
 export type SnippetInput = Omit<Snippet, "id">;
 
+export interface BackupStats {
+  servers_added: number;
+  servers_updated: number;
+  bookmarks_added: number;
+  snippets_added: number;
+}
+
 export interface DirEntry {
   name: string;
   path: string;
   is_dir: boolean;
+  size?: number;
+  mtime?: number | null;
+  mode?: string;
+  is_symlink?: boolean;
 }
 
 export interface DirListing {
   path: string;
   entries: DirEntry[];
+}
+
+export interface FileContentOut {
+  path: string;
+  content: string;
+  size: number;
+  mtime: number | null;
+  mode: string;
+}
+
+export interface FileActionOut {
+  path: string;
+  message: string;
+}
+
+export type FileType = "directory" | "file" | "link" | "device" | "fifo" | "socket" | "other";
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  type: FileType;
+  size: number;
+  mtime: number;
+  mode: number;
+  perms: string;
+  owner: string;
+  group: string;
+  target?: string;
+  target_type?: FileType | "broken";
+}
+
+export interface FileListOut {
+  path: string;
+  entries: FileEntry[];
+  self: FileEntry;
+}
+
+export interface FilePrincipalsOut {
+  users: string[];
+  groups: string[];
+  home: string;
+}
+
+export interface FileReadOut {
+  path: string;
+  content: string;
+  mtime: number;
+  size: number;
+}
+
+export interface FileActionBody {
+  op: "write" | "mkdir" | "symlink" | "rename" | "paste" | "delete" | "chmod";
+  path?: string;
+  paths?: string[];
+  new_path?: string;
+  dest_dir?: string;
+  mode?: number | "copy" | "move";
+  content?: string;
+  create?: boolean;
+  expected_mtime?: number;
+  target?: string;
+  owner?: string;
+  group?: string;
+  recursive?: boolean;
+}
+
+export interface FileRemote {
+  id: number;
+  name: string;
+  local_server_id: number;
+  local_path: string;
+  remote_server_id: number;
+  remote_path: string;
+  ignore: string[];
+  updated_at?: string;
+}
+
+export type FileRemoteInput = Omit<FileRemote, "id" | "updated_at">;
+export type TransferDirection = "upload" | "download";
+
+export interface TransferScan {
+  files: number;
+  dirs: number;
+  links: number;
+  bytes: number;
+  ignored: number;
+  unsupported: number;
+  skipped: string[];
+  tar_bytes: number;
+  source_server_id: number;
+  source_root: string;
+  dest_server_id: number;
+  dest_root: string;
+  rels: string[];
+  has_gitignore?: boolean;
+  use_gitignore?: boolean;
+}
+
+export interface TransferJob {
+  id: string;
+  remote_id?: number | null;
+  remote_name: string;
+  direction: TransferDirection | string;
+  state: "running" | "done" | "error" | "cancelled";
+  source_server_id: number;
+  source_root: string;
+  dest_server_id: number;
+  dest_root: string;
+  rels: string[];
+  read_gitignore?: boolean;
+  sent_bytes: number;
+  total_bytes: number;
+  total_files: number;
+  result: { files: number; dirs: number; links: number; bytes: number } | null;
+  error: string | null;
+}
+
+export interface DirectTransferScanIn {
+  source_server_id: number;
+  dest_server_id: number;
+  source_dir: string;
+  dest_dir: string;
+  paths: string[];
+  ignore?: string[];
+  use_gitignore?: boolean;
+}
+
+export interface DirectTransferStartIn {
+  source_server_id: number;
+  dest_server_id: number;
+  source_dir: string;
+  dest_dir: string;
+  paths: string[];
+  mode?: "copy" | "move";
+  ignore?: string[];
+  use_gitignore?: boolean;
+}
+
+export interface PastedImage {
+  path: string;
 }
 
 export interface ServerStats {
@@ -97,3 +248,113 @@ export interface AuthStatus {
   unlocked: boolean;
   session_valid: boolean;
 }
+
+export type ContainerEngineType = "podman" | "docker" | "none";
+
+export interface ContainerEngineInfo {
+  engine: ContainerEngineType;
+  version: string;
+  rootless: boolean;
+  error?: string | null;
+}
+
+export type ContainerState =
+  | "running"
+  | "exited"
+  | "paused"
+  | "created"
+  | "restarting"
+  | "dead"
+  | "unknown";
+
+export interface ContainerPort {
+  host_ip?: string;
+  host_port?: number;
+  container_port: number;
+  protocol?: string;
+}
+
+export interface ContainerItem {
+  id: string;
+  names: string[];
+  image: string;
+  state: ContainerState;
+  status: string;
+  created: number | string;
+  ports: ContainerPort[];
+  command?: string;
+}
+
+export interface ContainerActionBody {
+  server_id: number;
+  container_id: string;
+  action: "start" | "stop" | "restart" | "pause" | "unpause" | "delete";
+  force?: boolean;
+}
+
+export interface ContainerLogsOut {
+  logs: string;
+}
+
+export interface ImageItem {
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  created: string;
+}
+
+export interface ContainerRunBody {
+  server_id: number;
+  image: string;
+  name?: string;
+  ports?: string[];
+  env?: string[];
+  volumes?: string[];
+  command?: string;
+  restart?: string;
+}
+
+export interface CFAccount {
+  id: number;
+  name: string;
+  token_masked: string;
+  account_id: string;
+  account_name: string;
+  created_at: string;
+}
+
+export interface CFTunnel {
+  id: string;
+  name: string;
+  status: "healthy" | "inactive" | "down" | string;
+  conns_count: number;
+  created_at: string;
+  remote_config: boolean;
+}
+
+export interface CFZone {
+  id: string;
+  name: string;
+  status: string;
+}
+
+export interface CFRoute {
+  hostname: string;
+  service: string;
+}
+
+export interface CFRouteIn {
+  hostname: string;
+  service: string;
+  zone_id?: string;
+}
+
+declare global {
+  interface Window {
+    TermDeckApp?: {
+      saveBlob?: (base64Data: string, fileName: string, mimeType: string) => void;
+    };
+  }
+}
+

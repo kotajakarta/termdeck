@@ -7,3 +7,13 @@ frontend/dist/
 build/
 dist/
 *.spec
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/webapp/
+testokencf.txt
+*.token
+.env
+.env.*
+

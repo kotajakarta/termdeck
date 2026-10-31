@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # TermDeck launcher for Linux: prepares everything on first run, then serves http://localhost:9095
 #
-#   ./run.sh                 setup if needed, stop whatever holds the port, start, open the browser
+#   ./run.sh                 setup if needed, stop whatever holds the port, start in the background, open the app window
 #   ./run.sh --setup         recreate the Python virtualenv and reinstall dependencies
 #   ./run.sh --rebuild       rebuild the UI even if it looks up to date
+#   ./run.sh --no-push       skip auto-push to GitHub repository
+#   ./run.sh --foreground    stay attached to this terminal (Ctrl+C stops it)
+#   ./run.sh --no-app        open a normal browser tab instead of the app window (+ tray icon on WSL)
 #   ./run.sh --no-browser    other options go to termdeck.py (--no-browser, --port N)
+# Stop the background server with ./stop.sh (same --port if one was given).
 set -euo pipefail
 cd "$(dirname "$0")"
+. scripts/common.sh
 
 VENV=backend/.venv
 PY=$VENV/bin/python
@@ -14,29 +19,29 @@ CHECK=scripts/setup_check.py
 
 force_setup=0
 force_build=0
+foreground=0
+no_app=0
+no_browser=0
+no_push=0
 app_args=()
 for arg in "$@"; do
   case "$arg" in
     --setup) force_setup=1 ;;
     --rebuild) force_build=1 ;;
+    --foreground) foreground=1 ;;
+    --no-app) no_app=1 ;;
+    --no-push) no_push=1 ;;
+    --no-browser)
+      no_browser=1
+      app_args+=("$arg")
+      ;;
     -h | --help)
-      sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) app_args+=("$arg") ;;
   esac
 done
-
-if [ -t 2 ]; then
-  YELLOW=$'\033[1;33m' RED=$'\033[1;31m' RESET=$'\033[0m'
-else
-  YELLOW="" RED="" RESET=""
-fi
-step() { printf '%s==>%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
-die() {
-  printf '%sGagal:%s %s\n' "$RED" "$RESET" "$*" >&2
-  exit 1
-}
 
 find_python() {
   local candidate
@@ -77,49 +82,105 @@ if [ "$force_build" = 1 ] || ! "$PY" "$CHECK" ui; then
   (cd frontend && npm run build) || die "build UI gagal"
 fi
 
-# 4. Free the port: it is reserved for TermDeck, so an older instance is stopped -
-port=9095
-prev=""
-for arg in ${app_args[@]+"${app_args[@]}"}; do
-  [ "$prev" = "--port" ] && port=$arg
-  case "$arg" in --port=*) port=${arg#--port=} ;; esac
-  prev=$arg
-done
-case "$port" in '' | *[!0-9]*) die "port tidak valid: $port" ;; esac
-
-# PIDs listening on TCP port $1 (only processes visible to this user).
-port_pids() {
-  if command -v ss >/dev/null 2>&1; then
-    ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
-  elif command -v lsof >/dev/null 2>&1; then
-    lsof -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u || true
-  elif command -v fuser >/dev/null 2>&1; then
-    fuser -n tcp "$1" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true
+# 4. Push ke GitHub repository ----------------------------------------------
+if [ "$no_push" = 0 ] && command -v git >/dev/null 2>&1 && [ -d .git ]; then
+  repo_url="https://github.com/kotajakarta/termdeck.git"
+  step "Push kode ke GitHub ($repo_url)"
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    git remote add origin "$repo_url" 2>/dev/null || true
+  else
+    git remote set-url origin "$repo_url" 2>/dev/null || true
   fi
-}
+  current_branch=$(git branch --show-current 2>/dev/null || echo "master")
+  if [ -n "$(git status --porcelain)" ]; then
+    git add .
+    git commit -m "Auto-commit: $(date '+%Y-%m-%d %H:%M:%S')" || true
+  fi
+  git push -u origin "$current_branch" || echo "Peringatan: Gagal push ke GitHub (cek otentikasi/koneksi)."
+fi
 
-free_port() {
-  local pids pid
-  pids=$(port_pids "$1")
-  [ -z "$pids" ] && return 0
-  for pid in $pids; do
-    step "Menghentikan proses di port $1: PID $pid ($(ps -o args= -p "$pid" 2>/dev/null | cut -c1-90))"
-    kill "$pid" 2>/dev/null || true
-  done
-  # SIGTERM lets TermDeck close its database cleanly; wait up to 5 s before forcing.
-  for _ in $(seq 1 50); do
-    [ -z "$(port_pids "$1")" ] && return 0
-    sleep 0.1
-  done
-  for pid in $(port_pids "$1"); do
-    step "PID $pid tidak berhenti, dipaksa (SIGKILL)"
-    kill -9 "$pid" 2>/dev/null || true
-  done
-  sleep 0.5
-  [ -z "$(port_pids "$1")" ] || die "port $1 masih dipakai dan prosesnya tidak bisa dihentikan."
-}
-
+# 5. Free the port: it is reserved for TermDeck, so an older instance is stopped -
+port=$(parse_port ${app_args[@]+"${app_args[@]}"})
+unit="termdeck-$port"
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user stop "$unit.service" 2>/dev/null || true
+  systemctl --user reset-failed "$unit.service" 2>/dev/null || true
+fi
 free_port "$port"
 
-step "Menjalankan TermDeck"
-exec "$PY" termdeck.py ${app_args[@]+"${app_args[@]}"}
+# App mode (like the Android app): the server opens nothing itself, desktop_app.py opens the
+# app window afterwards (Chrome/Edge --app + Start Menu shortcut + tray icon on WSL).
+app_mode=0
+if [ "$no_app" = 0 ] && [ "$no_browser" = 0 ]; then
+  app_mode=1
+  app_args+=(--no-browser)
+fi
+
+if [ "$foreground" = 1 ]; then
+  step "Menjalankan TermDeck (Ctrl+C untuk berhenti)"
+  if [ "$app_mode" = 1 ]; then
+    "$PY" scripts/desktop_app.py open --port "$port" --wait &
+  fi
+  exec "$PY" termdeck.py ${app_args[@]+"${app_args[@]}"}
+fi
+
+# 6. Start detached: independent background process so closing this terminal does not stop it --
+log_dir=$(data_dir)
+mkdir -p "$log_dir"
+log="$log_dir/termdeck-$port.log"
+
+use_systemd=0
+if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --quiet true 2>/dev/null; then
+  use_systemd=1
+fi
+
+if [ "$use_systemd" = 1 ]; then
+  step "Menjalankan TermDeck di latar belakang (systemd user unit)"
+  # systemd user unit isolates the process from this login session (session-XX.scope),
+  # ensuring that closing the terminal or SSH session will NOT terminate TermDeck.
+  systemd-run --user \
+    --unit="$unit" \
+    --working-directory="$PWD" \
+    --setenv=PATH="$PATH" \
+    ${DISPLAY+--setenv=DISPLAY="$DISPLAY"} \
+    ${WAYLAND_DISPLAY+--setenv=WAYLAND_DISPLAY="$WAYLAND_DISPLAY"} \
+    --property="StandardOutput=append:$log" \
+    --property="StandardError=append:$log" \
+    "$PWD/$PY" "$PWD/termdeck.py" ${app_args[@]+"${app_args[@]}"} >/dev/null
+else
+  step "Menjalankan TermDeck di latar belakang (setsid)"
+  nohup setsid "$PY" termdeck.py ${app_args[@]+"${app_args[@]}"} >"$log" 2>&1 </dev/null &
+  pid_bg=$!
+  disown -a 2>/dev/null || true
+fi
+
+pid=""
+for _ in $(seq 1 150); do
+  pid=$(port_pids "$port" | head -n 1)
+  [ -n "$pid" ] && break
+  if [ "$use_systemd" = 1 ]; then
+    if ! systemctl --user is-active --quiet "$unit.service"; then
+      tail -n 20 "$log" >&2
+      die "TermDeck berhenti saat start (log lengkap: $log)"
+    fi
+  else
+    if ! kill -0 "$pid_bg" 2>/dev/null; then
+      tail -n 20 "$log" >&2
+      die "TermDeck berhenti saat start (log lengkap: $log)"
+    fi
+  fi
+  sleep 0.1
+done
+[ -n "$pid" ] || die "TermDeck belum siap di port $port setelah 15 detik (log: $log)"
+
+stop_cmd="./stop.sh"
+[ "$port" = "$DEFAULT_PORT" ] || stop_cmd="./stop.sh --port $port"
+echo "TermDeck berjalan di http://localhost:$port (PID $pid)"
+echo "Log: $log"
+echo "Terminal ini boleh ditutup. Untuk menghentikan: $stop_cmd"
+
+if [ "$app_mode" = 1 ]; then
+  step "Membuka jendela aplikasi TermDeck"
+  "$PY" scripts/desktop_app.py open --port "$port" ||
+    echo "Jendela aplikasi gagal dibuka; buka http://localhost:$port di browser, atau jalankan dengan --no-app."
+fi

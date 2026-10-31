@@ -44,20 +44,81 @@ Script ini mengurus semuanya:
 2. Memasang dependency Python, dan memasangnya ulang otomatis kalau `requirements.txt` berubah.
 3. Build UI ke `frontend/dist`, dan build ulang otomatis kalau kode UI berubah.
 4. Menghentikan proses yang masih memakai port 9095 (port ini khusus TermDeck), misalnya instance lama yang lupa ditutup. Proses diberi SIGTERM dulu agar database tertutup bersih, lalu SIGKILL kalau tidak berhenti dalam 5 detik.
-5. Menjalankan server dan membuka browser ke http://localhost:9095.
+5. Menjalankan server di latar belakang dan membuka TermDeck sebagai **jendela aplikasi** (lihat [Mode aplikasi desktop](#mode-aplikasi-desktop)). Server berjalan di session sendiri, jadi terminal boleh ditutup. Output server ditulis ke `termdeck-<port>.log` di folder data (default `~/.local/share/TermDeck`).
 
-Untuk berhenti, tekan `Ctrl+C` di terminal.
+Untuk berhenti:
+
+```bash
+./stop.sh               # port 9095
+./stop.sh --port 9100   # kalau dijalankan dengan --port
+```
+
+`stop.sh` hanya menghentikan proses TermDeck. Kalau port dipakai program lain, script menolak dan tidak menghentikan apa pun.
 
 | Opsi | Fungsi |
 |---|---|
-| `--no-browser` | Jalankan server tanpa membuka browser |
+| `--no-browser` | Jalankan server tanpa membuka apa pun |
+| `--no-app` | Buka tab browser biasa, bukan jendela aplikasi |
 | `--port 9100` | Pakai port lain |
+| `--foreground` | Tetap terikat ke terminal (berhenti dengan `Ctrl+C` atau saat terminal ditutup) |
 | `--setup` | Buat ulang virtualenv dan pasang ulang dependency |
 | `--rebuild` | Paksa build ulang UI |
 
 Contoh: `./run.sh --no-browser` atau `./run.sh --port 9100`.
 
-Di WSL, browser Windows dibuka otomatis dan mengakses `localhost:9095` lewat localhost forwarding WSL.
+Di WSL, aplikasi dibuka di sisi Windows dan mengakses `localhost:9095` lewat localhost forwarding WSL.
+
+### Mode aplikasi desktop
+
+Seperti aplikasi Android, versi desktop tampil di jendela sendiri tanpa address bar dan tab browser.
+
+**WSL (Windows):** `./run.sh` memasang komponen berikut ke `%LOCALAPPDATA%\TermDeck` (dipasang ulang otomatis kalau ada perubahan):
+
+- **Shortcut Start Menu "TermDeck"**: klik untuk membuka. Kalau server belum jalan, TermDeck menyalakannya sendiri (`./run.sh --no-browser` di distro WSL yang sama), jadi setelah setup pertama kamu tidak perlu membuka terminal lagi.
+- **Jendela Chrome/Edge mode aplikasi** dengan profil khusus (`%LOCALAPPDATA%\TermDeck\browser`), terpisah dari browser biasa. Kalau jendelanya sudah terbuka, jendela itu yang difokuskan. Jendela dari server lama (token sudah berganti) otomatis diganti.
+- **Ikon tray** (padanan notifikasi Android):
+  - klik kiri atau *Buka TermDeck*: buka atau fokuskan jendela
+  - *Kunci dan Putuskan*: kunci vault dan putuskan semua SSH (`POST /api/auth/lock-all`). Jendela akan meminta PIN lagi.
+  - *Hentikan TermDeck dan keluar*: tutup jendela, jalankan `./stop.sh`, lalu keluar dari tray
+- **Sesi tetap hidup**: selama tray berjalan, WSL dijaga tetap hidup supaya koneksi di latar belakang tidak terputus saat jendela ditutup.
+
+Komponen ini butuh Chrome atau Edge (kalau keduanya tidak ada, browser default yang dipakai). Untuk menghapusnya, hapus folder `%LOCALAPPDATA%\TermDeck` dan `TermDeck.lnk` di `%APPDATA%\Microsoft\Windows\Start Menu\Programs`.
+
+**Linux desktop (non-WSL):** `./run.sh` membuka jendela `--app` kalau Chromium, Chrome, Brave, atau Edge terpasang. Kalau tidak ada, yang dibuka tab browser default. Versi ini tidak memakai tray atau shortcut menu.
+
+## Aplikasi Android (Standalone APK)
+
+TermDeck juga dapat di-build menjadi aplikasi Android mandiri (`id.termdeck.app`) yang berjalan sepenuhnya di HP/tablet tanpa memerlukan server backend eksternal:
+- Membawa **embedded Ktor HTTP/WebSocket server** di `127.0.0.1` dengan database terenkripsi **SQLCipher (AES-256)** + **scrypt** dan klien SSH native (**SSHJ** + **BouncyCastle** + **EdDSA**).
+- Dilengkapi **drawer sidebar responsif** dan **Mobile Terminal Key Bar** (`Esc`, `Tab`, sticky `Ctrl` & `Alt`, tombol panah `↑↓←→` yang mendukung `DECCKM`, `Home`, `End`, `PgUp`, `PgDn`, simbol cepat, lompat path `Alt+P`/`Alt+J`, tempel clipboard, dan unggah gambar langsung dari galeri HP ke server).
+
+Untuk mem-build file APK:
+
+```bash
+./build-android.sh
+```
+
+Script ini otomatis menyiapkan frontend, mengunduh JDK 17 & Android SDK lokal jika belum tersedia, menjalankan unit test, dan menghasilkan file instalasi di `dist/termdeck-android.apk`.
+
+## Aplikasi Android (Mandiri)
+
+TermDeck juga bisa dibangun menjadi aplikasi Android mandiri (`dist/termdeck-android.apk`) yang melakukan koneksi SSH langsung dari HP tanpa butuh server backend eksternal:
+
+```bash
+./build-android.sh
+```
+
+Script `build-android.sh` mengurus seluruh proses secara otomatis:
+1. Memastikan OpenJDK 17, Gradle, dan Android SDK Platform 34 tersedia (diunduh otomatis ke `~/.local/share/termdeck-android-sdk` bila belum terpasang).
+2. Membangun UI `frontend/dist` dan menyematkannya ke aset aplikasi Android.
+3. Menjalankan unit test JUnit Android (`testDebugUnitTest`).
+4. Menghasilkan file APK siap pasang di `dist/termdeck-android.apk`.
+
+Fitur khusus versi Android:
+- **Koneksi SSH & SFTP Native Mandiri**: memakai SSHJ + BouncyCastle + EdDSA langsung dari perangkat Android (mendukung password, private key RSA/Ed25519/ECDSA + passphrase, verifikasi *Host Key* TOFU, *connection pooling*, PTY `xterm-256color`, jelajah folder SFTP + *fallback* `ls`, tempel gambar dari galeri HP ke server, dan statistik *live*).
+- **Vault SQLCipher AES-256**: database terenkripsi penuh dengan kunci turunan `scrypt` dari PIN (PIN awal `7821724`) di penyimpanan internal privat aplikasi.
+- **Layar Sentuh & Bilah Tombol Terminal**: sidebar otomatis menjadi *drawer* buka-tutup di layar HP, dilengkapi bilah tombol terminal (`Ctrl`, `Alt` *sticky*, `Esc`, `Tab`, panah `↑↓←→`, `Home`, `End`, `PgUp`, `PgDn`, `-`, `/`, `|`, `~`, `^C`, tombol cepat `Tempel`, `Gambar`, `Path`, dan `Proyek`).
+- **Sesi Tetap Hidup**: layanan latar depan (*foreground service*) menjaga koneksi terminal tetap hidup saat Anda berpindah aplikasi sebentar (misalnya untuk menyalin OTP atau password).
 
 ## Login PIN
 
@@ -123,6 +184,9 @@ browser ── http://localhost:9095 ── termdeck.py (uvicorn, 127.0.0.1:9095
 ```
 termdeck.py           entry point (port, buka browser)
 scripts/setup_check.py  cek apakah dependency / build UI perlu diperbarui (dipakai run.sh)
+scripts/common.sh       helper bersama run.sh dan stop.sh (port, folder data, hentikan proses)
+scripts/desktop_app.py  mode aplikasi desktop: jendela --app, shortcut Start Menu + tray (WSL)
+scripts/windows/termdeck-tray.ps1  ikon tray Windows (buka, kunci, hentikan)
 backend/app/
   config.py   lokasi data
   crypto.py   dekripsi format lama (untuk migrasi)

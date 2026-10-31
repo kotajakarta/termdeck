@@ -29,25 +29,26 @@ from app.vault import Vault  # noqa: E402
 
 STATIC_DIR = ROOT / "frontend" / "dist"
 DEFAULT_PORT = 9095
-BIND_HOST = "127.0.0.1"
+DEFAULT_HOST = "127.0.0.1"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TermDeck - terminal SSH multi-server di browser")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port (default: {DEFAULT_PORT})")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"host bind address (default: {DEFAULT_HOST})")
     parser.add_argument("--no-browser", action="store_true", help="jangan buka browser otomatis")
     parser.add_argument("--token", default="", help="token sesi tetap, untuk development (default: acak)")
     return parser.parse_args()
 
 
-def port_available(port: int) -> bool:
+def port_available(port: int, host: str = DEFAULT_HOST) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         # Same option uvicorn uses: connections left over from a just-stopped
         # instance (TIME_WAIT/FIN_WAIT) must not count as "in use", only a
         # socket that is actually listening.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind((BIND_HOST, port))
+            sock.bind((host, port))
         except OSError:
             return False
     return True
@@ -85,7 +86,7 @@ def main() -> int:
     if not (STATIC_DIR / "index.html").exists():
         print(f"UI belum di-build: {STATIC_DIR} tidak ada. Jalankan ./run.sh, atau `npm run build` di folder frontend.")
         return 1
-    if not port_available(args.port):
+    if not port_available(args.port, args.host):
         print(
             f"Port {args.port} sudah dipakai. Jika TermDeck sudah berjalan, buka http://localhost:{args.port}\n"
             "Atau jalankan dengan port lain, mis. --port 9100"
@@ -95,10 +96,11 @@ def main() -> int:
     folder = data_dir()
     token = args.token or secrets.token_urlsafe(32)
     # The encrypted database stays closed until the PIN is entered in the browser.
-    app = create_app(Vault(folder, initial_pin()), token, STATIC_DIR, allowed_hosts=LOCAL_HOSTS)
-    server = uvicorn.Server(uvicorn.Config(app, host=BIND_HOST, port=args.port, log_level="warning"))
+    allowed_hosts = LOCAL_HOSTS if args.host in ("127.0.0.1", "localhost") else None
+    app = create_app(Vault(folder, initial_pin()), token, STATIC_DIR, allowed_hosts=allowed_hosts)
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
 
-    url = f"http://localhost:{args.port}"
+    url = f"http://localhost:{args.port}" if args.host in ("127.0.0.1", "0.0.0.0") else f"http://{args.host}:{args.port}"
     print(f"TermDeck berjalan di {url}\nData: {folder}\nTekan Ctrl+C untuk berhenti.", flush=True)
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(server, url), daemon=True).start()

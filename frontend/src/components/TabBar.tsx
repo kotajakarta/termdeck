@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { serverColor } from "../format";
 import type { Server, Tab } from "../types";
-import { LAYOUTS, SNAP_LAYOUTS, layoutDimensions, type LayoutKind } from "../layout";
+import {
+  DEFAULT_FONT_SIZE,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  layoutDimensions,
+  type LayoutKind,
+} from "../layout";
 import { Icon, type IconName } from "./Icon";
 import { SnapLayoutPicker } from "./SnapLayoutPicker";
 
@@ -12,10 +18,21 @@ interface TabBarProps {
   visibleIds: Set<string>;
   layout: LayoutKind;
   onLayout: (layout: LayoutKind, targetSlot?: number) => void;
+  fontSize: number;
+  onStepFontSize: (delta: number) => void;
+  onResetFontSize: () => void;
+  broadcastMode?: boolean;
+  onToggleBroadcast?: () => void;
+  workspaceMode?: "terminal" | "files" | "containers";
+  onChangeWorkspaceMode?: (mode: "terminal" | "files" | "containers") => void;
+  onOpenFiles?: () => void;
+  onOpenContainers?: () => void;
   servers: Map<number, Server>;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onOpenPalette: () => void;
+  sidebarOpen?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 const STATUS_LABEL: Record<Tab["status"], string> = {
@@ -25,32 +42,53 @@ const STATUS_LABEL: Record<Tab["status"], string> = {
   error: "Gagal",
 };
 
+const MAIN_LAYOUTS: { kind: LayoutKind; label: string; icon: IconName }[] = [
+  { kind: "1", label: "Full screen (Satu panel)", icon: "layout1" },
+  { kind: "2h", label: "Split atas & bawah (Dua baris)", icon: "layout2h" },
+];
+
 export function TabBar({
   tabs,
   activeId,
   visibleIds,
   layout,
   onLayout,
+  fontSize,
+  onStepFontSize,
+  onResetFontSize,
+  broadcastMode = false,
+  onToggleBroadcast,
+  workspaceMode = "terminal",
+  onChangeWorkspaceMode,
+  onOpenFiles,
+  onOpenContainers,
   servers,
   onSelect,
   onClose,
   onOpenPalette,
+  sidebarOpen,
+  onToggleSidebar,
 }: TabBarProps) {
   const [showSnapPicker, setShowSnapPicker] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
   const currentDims = layoutDimensions(layout);
   const [hoverDims, setHoverDims] = useState<{ rows: number; cols: number } | null>(null);
   const [manualRows, setManualRows] = useState(currentDims.rows);
   const [manualCols, setManualCols] = useState(currentDims.cols);
 
-  const isStandardPreset = LAYOUTS.some((item) => item.kind === layout);
-  const isSnapPreset = SNAP_LAYOUTS.some((item) => item.kind === layout);
-
   useEffect(() => {
     setManualRows(currentDims.rows);
     setManualCols(currentDims.cols);
   }, [currentDims.rows, currentDims.cols]);
+
+  // Keep the active tab in view when the strip scrolls (many tabs on a narrow screen).
+  useEffect(() => {
+    tabsRef.current
+      ?.querySelector<HTMLElement>(".tab.is-active")
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeId, tabs.length]);
 
   useEffect(() => {
     if (!showPicker && !showSnapPicker) return;
@@ -79,7 +117,68 @@ export function TabBar({
 
   return (
     <div className="tabbar">
-      <div className="tabs" role="tablist" aria-label="Terminal terbuka">
+      {onToggleSidebar && (
+        <button
+          type="button"
+          className={`icon-btn sidebar-toggle-btn${sidebarOpen ? " is-on" : ""}`}
+          onClick={onToggleSidebar}
+          aria-expanded={sidebarOpen}
+          aria-label="Buka atau tutup daftar server"
+          title="Daftar server & path"
+        >
+          <Icon name="menu" size={16} />
+        </button>
+      )}
+      {servers.size > 0 && onChangeWorkspaceMode && (
+        <div className="workspace-mode-switch" role="tablist" aria-label="Mode Workspace">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={workspaceMode === "terminal"}
+            className={`workspace-mode-btn${workspaceMode === "terminal" ? " is-active" : ""}`}
+            onClick={() => onChangeWorkspaceMode("terminal")}
+            title="Mode Terminal"
+          >
+            <Icon name="terminal" size={13} />
+            <span>Terminal</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={workspaceMode === "files"}
+            className={`workspace-mode-btn${workspaceMode === "files" ? " is-active" : ""}`}
+            onClick={() => {
+              if (workspaceMode !== "files" && onOpenFiles) {
+                onOpenFiles();
+              } else {
+                onChangeWorkspaceMode("files");
+              }
+            }}
+            title="Mode File Manager (Cockpit)"
+          >
+            <Icon name="folder" size={13} />
+            <span>Files</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={workspaceMode === "containers"}
+            className={`workspace-mode-btn${workspaceMode === "containers" ? " is-active" : ""}`}
+            onClick={() => {
+              if (workspaceMode !== "containers" && onOpenContainers) {
+                onOpenContainers();
+              } else {
+                onChangeWorkspaceMode("containers");
+              }
+            }}
+            title="Mode Containers (Podman / Docker)"
+          >
+            <Icon name="box" size={13} />
+            <span>Containers</span>
+          </button>
+        </div>
+      )}
+      <div className="tabs" role="tablist" aria-label="Terminal terbuka" ref={tabsRef}>
         {tabs.map((tab) => {
           const server = servers.get(tab.serverId);
           return (
@@ -114,29 +213,62 @@ export function TabBar({
           );
         })}
       </div>
-      <div className="layout-switch" role="radiogroup" aria-label="Tata letak terminal" ref={pickerRef}>
+      <div className="font-switch" role="group" aria-label="Ukuran huruf terminal">
         <button
           type="button"
-          role="radio"
-          aria-checked={isSnapPreset && !isStandardPreset}
-          className={`icon-btn snap-toggle-btn${(isSnapPreset && !isStandardPreset) || showSnapPicker ? " is-on" : ""}`}
-          onClick={() => {
-            setShowSnapPicker((v) => !v);
-            setShowPicker(false);
-          }}
-          title="Snap Layouts Windows (Alt+S)"
-          aria-label="Snap Layouts Windows"
+          className="font-step-btn"
+          disabled={fontSize <= MIN_FONT_SIZE}
+          onClick={() => onStepFontSize(-1)}
+          title="Kecilkan ukuran huruf terminal (Alt+-)"
+          aria-label="Kecilkan ukuran huruf terminal"
         >
-          <Icon name="layoutSnap" size={15} />
+          A−
         </button>
-
-        {LAYOUTS.map((item) => (
+        <button
+          type="button"
+          className={`font-size-badge${fontSize !== DEFAULT_FONT_SIZE ? " is-changed" : ""}`}
+          onClick={onResetFontSize}
+          title={`Ukuran huruf ${fontSize}px — klik untuk reset ke ${DEFAULT_FONT_SIZE}px (Alt+0)`}
+          aria-label={`Ukuran huruf ${fontSize} piksel, klik untuk reset`}
+        >
+          {fontSize}px
+        </button>
+        <button
+          type="button"
+          className="font-step-btn"
+          disabled={fontSize >= MAX_FONT_SIZE}
+          onClick={() => onStepFontSize(1)}
+          title="Besarkan ukuran huruf terminal (Alt+=)"
+          aria-label="Besarkan ukuran huruf terminal"
+        >
+          A+
+        </button>
+      </div>
+      {visibleIds.size > 1 && onToggleBroadcast && (
+        <button
+          type="button"
+          className={`icon-btn broadcast-toggle-btn${broadcastMode ? " is-on" : ""}`}
+          onClick={onToggleBroadcast}
+          aria-pressed={broadcastMode}
+          title={
+            broadcastMode
+              ? "Mode Broadcast AKTIF: ketikan dikirim ke semua panel split"
+              : "Aktifkan Mode Broadcast (ketik ke semua panel split sekaligus)"
+          }
+          aria-label="Mode Broadcast ke semua panel"
+        >
+          <Icon name="broadcast" size={15} />
+        </button>
+      )}
+      <div className="layout-switch" role="radiogroup" aria-label="Tata letak terminal" ref={pickerRef}>
+        {MAIN_LAYOUTS.map((item) => (
           <button
             key={item.kind}
             type="button"
             role="radio"
             aria-checked={layout === item.kind}
             className={`icon-btn${layout === item.kind ? " is-on" : ""}`}
+            data-layout={item.kind}
             onClick={() => {
               setShowPicker(false);
               setShowSnapPicker(false);
@@ -145,23 +277,23 @@ export function TabBar({
             title={item.label}
             aria-label={item.label}
           >
-            <Icon name={`layout${item.kind}` as IconName} size={15} />
+            <Icon name={item.icon} size={15} />
           </button>
         ))}
 
         <button
           type="button"
           role="radio"
-          aria-checked={!isStandardPreset && !isSnapPreset}
-          className={`icon-btn${!isStandardPreset && !isSnapPreset ? " is-on" : ""}${showPicker ? " is-active" : ""}`}
+          aria-checked={(layout !== "1" && layout !== "2h") || showSnapPicker}
+          className={`icon-btn snap-toggle-btn${(layout !== "1" && layout !== "2h") || showSnapPicker ? " is-on" : ""}`}
           onClick={() => {
-            setShowPicker((v) => !v);
-            setShowSnapPicker(false);
+            setShowSnapPicker((v) => !v);
+            setShowPicker(false);
           }}
-          title={`Kustom tata letak...${!isStandardPreset && !isSnapPreset ? ` (${currentDims.rows}×${currentDims.cols})` : ""}`}
-          aria-label="Kustom tata letak"
+          title="Snap Layouts & Split lainnya (Alt+S)"
+          aria-label="Snap Layouts & Split lainnya"
         >
-          <Icon name="layoutCustom" size={15} />
+          <Icon name="layoutSnap" size={15} />
         </button>
 
         {showSnapPicker && (

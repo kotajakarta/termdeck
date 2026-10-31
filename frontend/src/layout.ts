@@ -407,3 +407,74 @@ export function removeTab(state: PaneState, tabId: string, allTabIds: string[]):
     hidden.find((id) => allTabIds.indexOf(id) > index) ?? hidden[hidden.length - 1] ?? null;
   return { ...state, slots: state.slots.map((id) => (id === tabId ? replacement : id)) };
 }
+
+export const DEFAULT_FONT_SIZE = 14;
+export const MIN_FONT_SIZE = 8;
+export const MAX_FONT_SIZE = 28;
+
+export function clampFontSize(size: number): number {
+  if (!Number.isFinite(size)) return DEFAULT_FONT_SIZE;
+  return Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(size)));
+}
+
+export function stepFontSize(current: number, delta: number): number {
+  return clampFontSize(clampFontSize(current) + delta);
+}
+
+export interface BookmarkUsageEntry {
+  count: number;
+  lastUsed: number;
+}
+
+export type BookmarkUsageMap = Record<number, BookmarkUsageEntry>;
+
+export interface PresetPath {
+  name: string;
+  path: string;
+  description: string;
+}
+
+export const COMMON_SERVER_PATHS: PresetPath[] = [
+  { name: "Home (~)", path: "~", description: "Folder utama user" },
+  { name: "Web Root (/var/www)", path: "/var/www", description: "Folder aplikasi web" },
+  { name: "Public HTML (/var/www/html)", path: "/var/www/html", description: "Document root standar" },
+  { name: "Docker & Opt (/opt)", path: "/opt", description: "Aplikasi & container" },
+  { name: "Services (/srv)", path: "/srv", description: "Data layanan server" },
+  { name: "Konfigurasi (/etc)", path: "/etc", description: "Konfigurasi sistem & aplikasi" },
+  { name: "Nginx Config (/etc/nginx)", path: "/etc/nginx", description: "Virtual host & proxy" },
+  { name: "System Logs (/var/log)", path: "/var/log", description: "Log sistem & layanan" },
+];
+
+export function recordBookmarkUse(
+  usage: BookmarkUsageMap,
+  bookmarkId: number,
+  now: number = Date.now(),
+): BookmarkUsageMap {
+  const prev = usage[bookmarkId];
+  return {
+    ...usage,
+    [bookmarkId]: {
+      count: (prev?.count ?? 0) + 1,
+      lastUsed: now,
+    },
+  };
+}
+
+export function rankFrequentBookmarks<T extends { id: number; name: string }>(
+  bookmarks: T[],
+  usage: BookmarkUsageMap,
+): (T & { useCount: number; lastUsed: number })[] {
+  return bookmarks
+    .map((bm) => ({
+      ...bm,
+      useCount: usage[bm.id]?.count ?? 0,
+      lastUsed: usage[bm.id]?.lastUsed ?? 0,
+    }))
+    .sort((a, b) => {
+      if (b.useCount !== a.useCount) return b.useCount - a.useCount;
+      if (b.lastUsed !== a.lastUsed) return b.lastUsed - a.lastUsed;
+      return a.name.localeCompare(b.name);
+    });
+}
+
+

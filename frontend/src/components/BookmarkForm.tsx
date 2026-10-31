@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 
 import { api, errorMessage } from "../api";
+import { COMMON_SERVER_PATHS } from "../layout";
 import type { Bookmark, DirListing, Server } from "../types";
 import { Icon } from "./Icon";
 import { Modal } from "./Modal";
@@ -123,6 +124,23 @@ export function BookmarkForm({ servers, bookmark, serverId: initialServerId, onC
           <button type="button" className="btn align-end" onClick={() => void browse(path)}>
             <Icon name="folder" size={14} /> Jelajahi
           </button>
+        </div>
+
+        <div className="common-paths-chips" aria-label="Path populer">
+          {COMMON_SERVER_PATHS.map((preset) => (
+            <button
+              key={preset.path}
+              type="button"
+              className={`path-chip${path.trim() === preset.path ? " is-active" : ""}`}
+              onClick={() => {
+                setPath(preset.path);
+                if (!name.trim()) setName(preset.path === "~" ? "Home" : lastSegment(preset.path));
+              }}
+              title={`${preset.description} (${preset.path})`}
+            >
+              <code>{preset.path}</code>
+            </button>
+          ))}
         </div>
 
         {browsing && (

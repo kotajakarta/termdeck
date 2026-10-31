@@ -1,19 +1,51 @@
 import asyncio
 import json
+import mimetypes
 import secrets as pysecrets
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import asyncssh
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel
 
+from .containers_api import register_containers_routes
+from .cloudflare_api import register_cloudflare_routes
+from .backup import (
+    InvalidBackupError,
+    InvalidBackupPinError,
+    collect_store_backup,
+    decrypt_config,
+    encrypt_config,
+    merge_backup_into_store,
+)
 from .db import Store
+from .files_api import register_files_routes
 from .schemas import (
+    BackupExportIn,
+    BackupImportIn,
+    BackupStatsOut,
     BookmarkIn,
     BookmarkOut,
     ConnectionCheck,
     DirListing,
+    FileActionOut,
+    FileChmodIn,
+    FileContentOut,
+    FilePathIn,
+    FileRenameIn,
+    FileWriteIn,
+    PastedImage,
     ServerIn,
     ServerOut,
     ServerSecrets,
@@ -22,12 +54,15 @@ from .schemas import (
     SnippetOut,
 )
 from .ssh import (
+    MAX_PASTE_BYTES,
+    MAX_UPLOAD_FILE_BYTES,
     ConnectionPool,
     HostKeyMismatch,
     RemotePathError,
     ServerNotFound,
     build_cd_command,
     open_connection,
+    sniff_image_type,
 )
 from .vault import InvalidPin, TooManyAttempts, Vault
 
@@ -93,13 +128,15 @@ def pin_error(exc: InvalidPin | TooManyAttempts) -> HTTPException:
 
 
 def create_api_router(vault: Vault, token: str) -> APIRouter:
-    def require_token(x_token: str = Header(default="")) -> None:
-        if not pysecrets.compare_digest(x_token.encode(), token.encode()):
+    def require_token(request: Request, x_token: str = Header(default="")) -> None:
+        candidate = x_token or request.query_params.get("token", "")
+        if not pysecrets.compare_digest(candidate.encode(), token.encode()):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token tidak valid")
 
-    def unlocked(x_session: str = Header(default="")) -> Unlocked:
+    def unlocked(request: Request, x_session: str = Header(default="")) -> Unlocked:
+        candidate_session = x_session or request.query_params.get("session", "")
         store, pool = vault.store, vault.pool
-        if not vault.check_session(x_session) or store is None or pool is None:
+        if not vault.check_session(candidate_session) or store is None or pool is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sesi berakhir. Masukkan PIN lagi.")
         return Unlocked(store=store, pool=pool)
 
@@ -128,6 +165,13 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
 
     @router.post("/auth/lock", status_code=status.HTTP_204_NO_CONTENT)
     async def lock(_: Unlocked = Depends(unlocked)) -> Response:
+        await vault.lock()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.post("/auth/lock-all", status_code=status.HTTP_204_NO_CONTENT)
+    async def lock_all() -> Response:
+        # Used by the desktop tray icon (the Android notification's "Kunci & Putuskan"): it has the
+        # page token but no PIN session. Locking only removes access, it never reveals data.
         await vault.lock()
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -228,6 +272,148 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
         except SSH_ERRORS as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
 
+    @router.post("/servers/{server_id}/paste-image")
+    async def paste_image(server_id: int, request: Request, ctx: Unlocked = Depends(unlocked)) -> PastedImage:
+        """Raw image body (not multipart); saved on the server so terminal tools can open it by path."""
+        ensure_server(ctx, server_id)
+        too_large = HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Gambar maksimal {MAX_PASTE_BYTES // (1024 * 1024)} MB."
+        )
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_PASTE_BYTES:
+                raise too_large
+        data = bytes(body)
+        ext = sniff_image_type(data)
+        if ext is None:
+            raise HTTPException(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Format gambar tidak didukung (PNG, JPEG, GIF, WebP)."
+            )
+        try:
+            return PastedImage(path=await ctx.pool.upload_paste(server_id, data, ext))
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.get("/servers/{server_id}/files/read")
+    async def read_file(server_id: int, path: str, ctx: Unlocked = Depends(unlocked)) -> FileContentOut:
+        ensure_server(ctx, server_id)
+        try:
+            return await ctx.pool.read_file(server_id, path)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.put("/servers/{server_id}/files/write")
+    async def write_file(server_id: int, data: FileWriteIn, ctx: Unlocked = Depends(unlocked)) -> FileActionOut:
+        ensure_server(ctx, server_id)
+        try:
+            return await ctx.pool.write_file(server_id, data.path, data.content)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.post("/servers/{server_id}/files/mkdir")
+    async def mkdir_file(server_id: int, data: FilePathIn, ctx: Unlocked = Depends(unlocked)) -> FileActionOut:
+        ensure_server(ctx, server_id)
+        try:
+            return await ctx.pool.mkdir(server_id, data.path)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.post("/servers/{server_id}/files/rename")
+    async def rename_file(server_id: int, data: FileRenameIn, ctx: Unlocked = Depends(unlocked)) -> FileActionOut:
+        ensure_server(ctx, server_id)
+        try:
+            return await ctx.pool.rename_file(server_id, data.old_path, data.new_path)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.post("/servers/{server_id}/files/chmod")
+    async def chmod_file(server_id: int, data: FileChmodIn, ctx: Unlocked = Depends(unlocked)) -> FileActionOut:
+        ensure_server(ctx, server_id)
+        try:
+            return await ctx.pool.chmod_file(server_id, data.path, data.mode)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.delete("/servers/{server_id}/files", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_file(server_id: int, path: str, ctx: Unlocked = Depends(unlocked)) -> Response:
+        ensure_server(ctx, server_id)
+        try:
+            await ctx.pool.delete_file(server_id, path)
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.post("/servers/{server_id}/files/upload")
+    async def upload_file(
+        server_id: int, path: str, request: Request, ctx: Unlocked = Depends(unlocked)
+    ) -> FileActionOut:
+        ensure_server(ctx, server_id)
+        too_large = HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"Ukuran file maksimal {MAX_UPLOAD_FILE_BYTES // (1024 * 1024)} MB.",
+        )
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_UPLOAD_FILE_BYTES:
+                raise too_large
+        try:
+            return await ctx.pool.upload_file(server_id, path, bytes(body))
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
+    @router.get("/servers/{server_id}/files/download")
+    async def download_file(server_id: int, path: str, ctx: Unlocked = Depends(unlocked)) -> Response:
+        ensure_server(ctx, server_id)
+        filename = path.rstrip("/").rsplit("/", 1)[-1] or "download"
+        safe_name = filename.replace('"', "_").replace("\\", "_")
+        encoded = quote(filename)
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        try:
+            data = await ctx.pool.download_file(server_id, path)
+            return Response(
+                content=data,
+                media_type=media_type,
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded}'},
+            )
+        except RemotePathError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except SSH_ERRORS as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, ssh_error_message(exc)) from exc
+
     # ---- bookmarks -----------------------------------------------------
 
     @router.get("/bookmarks")
@@ -275,6 +461,32 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
         if not ctx.store.delete_snippet(snippet_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Snippet tidak ditemukan")
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # ---- config backup -------------------------------------------------
+
+    @router.post("/config/export")
+    async def export_config(data: BackupExportIn, ctx: Unlocked = Depends(unlocked)) -> dict:
+        try:
+            payload = await asyncio.to_thread(collect_store_backup, ctx.store)
+            envelope = await asyncio.to_thread(encrypt_config, payload, data.pin)
+            return envelope
+        except InvalidBackupPinError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    @router.post("/config/import")
+    async def import_config(data: BackupImportIn, ctx: Unlocked = Depends(unlocked)) -> BackupStatsOut:
+        try:
+            payload = await asyncio.to_thread(decrypt_config, data.backup, data.pin)
+            stats = await asyncio.to_thread(merge_backup_into_store, ctx.store, payload)
+            return BackupStatsOut(**stats)
+        except InvalidBackupPinError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except InvalidBackupError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    register_files_routes(router, unlocked)
+    register_containers_routes(router, unlocked)
+    register_cloudflare_routes(router, unlocked)
 
     return router
 

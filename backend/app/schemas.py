@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -69,11 +69,47 @@ class DirEntry(BaseModel):
     name: str
     path: str
     is_dir: bool
+    size: int = 0
+    mtime: int | None = None
+    mode: str = ""
+    is_symlink: bool = False
 
 
 class DirListing(BaseModel):
     path: str
     entries: list[DirEntry]
+
+
+class FileContentOut(BaseModel):
+    path: str
+    content: str
+    size: int
+    mtime: int | None = None
+    mode: str = "0644"
+
+
+class FileWriteIn(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+    content: str
+
+
+class FilePathIn(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+
+
+class FileRenameIn(BaseModel):
+    old_path: str = Field(min_length=1, max_length=2048)
+    new_path: str = Field(min_length=1, max_length=2048)
+
+
+class FileChmodIn(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+    mode: str = Field(min_length=3, max_length=4)
+
+
+class FileActionOut(BaseModel):
+    path: str
+    message: str
 
 
 class ServerStats(BaseModel):
@@ -92,3 +128,53 @@ class ServerStats(BaseModel):
 class ConnectionCheck(BaseModel):
     ok: bool
     message: str
+
+
+class PastedImage(BaseModel):
+    path: str
+
+
+class BackupExportIn(BaseModel):
+    pin: str = Field(min_length=1, max_length=128)
+
+
+class BackupImportIn(BaseModel):
+    pin: str = Field(min_length=1, max_length=128)
+    backup: dict[str, Any]
+
+
+class BackupStatsOut(BaseModel):
+    servers_added: int
+    servers_updated: int
+    bookmarks_added: int
+    snippets_added: int
+
+
+class CFAccountIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    token: str = Field(min_length=10, max_length=255)
+
+
+class CFAccountUpdateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    token: str | None = Field(default=None, max_length=255)
+
+
+class CFAccountVerifyIn(BaseModel):
+    token: str = Field(min_length=10, max_length=255)
+
+
+class CFAccountOut(BaseModel):
+    id: int
+    name: str
+    token_masked: str
+    account_id: str
+    account_name: str
+    created_at: str
+
+
+class CFRouteIn(BaseModel):
+    hostname: str = Field(min_length=3, max_length=255)
+    service: str = Field(min_length=1, max_length=255)
+    zone_id: str | None = Field(default=None, max_length=64)
+

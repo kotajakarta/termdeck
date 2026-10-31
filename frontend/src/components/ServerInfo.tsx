@@ -33,7 +33,15 @@ function Meter({ label, used, total }: { label: string; used: number | null; tot
   );
 }
 
-export function ServerInfo({ server, onOpen }: { server: Server; onOpen: () => void }) {
+export function ServerInfo({
+  server,
+  onOpen,
+  onOpenContainers,
+}: {
+  server: Server;
+  onOpen: () => void;
+  onOpenContainers?: () => void;
+}) {
   // Shared by every server: once minimized it stays out of the way of the server list.
   const [collapsed, setCollapsed] = usePersistentFlag("termdeck.info.collapsed", false);
   const [stats, setStats] = useState<ServerStats | null>(null);
@@ -130,9 +138,21 @@ export function ServerInfo({ server, onOpen }: { server: Server; onOpen: () => v
             </>
           )}
 
-          <button type="button" className="btn btn-block" onClick={onOpen}>
-            <Icon name="terminal" size={14} /> Buka terminal baru
-          </button>
+          <div style={{ display: "grid", gridTemplateColumns: onOpenContainers ? "1fr 1fr" : "1fr", gap: "6px" }}>
+            <button type="button" className="btn btn-block" onClick={onOpen}>
+              <Icon name="terminal" size={14} /> Terminal
+            </button>
+            {onOpenContainers && (
+              <button
+                type="button"
+                className="btn btn-block btn-subtle"
+                onClick={onOpenContainers}
+                title="Kelola Containers (Podman / Docker)"
+              >
+                <Icon name="box" size={14} /> Containers
+              </button>
+            )}
+          </div>
         </div>
       )}
     </section>

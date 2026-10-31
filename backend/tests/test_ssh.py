@@ -1,5 +1,9 @@
 import asyncio
+import os
+import stat
+import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 import asyncssh
@@ -7,7 +11,17 @@ import pytest
 
 from app.db import Store
 from app.schemas import ServerIn
-from app.ssh import ConnectionPool, HostKeyMismatch, RemotePathError, build_cd_command, parse_stats
+from app.ssh import (
+    PASTE_DIR,
+    PASTE_KEEP_SECONDS,
+    ConnectionPool,
+    HostKeyMismatch,
+    RemotePathError,
+    build_cd_command,
+    parse_stats,
+    paste_image_name,
+    sniff_image_type,
+)
 
 
 class _TestServer(asyncssh.SSHServer):
@@ -201,3 +215,80 @@ async def test_listdir_falls_back_to_shell_without_sftp(store: Store, tmp_path: 
         await acceptor.wait_closed()
     assert listing.path == str(tmp_path / "my proj")
     assert [(e.name, e.is_dir) for e in listing.entries] == [("link", True), ("src", True), (".env", False)]
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def test_sniff_image_type() -> None:
+    assert sniff_image_type(PNG) == "png"
+    assert sniff_image_type(b"\xff\xd8\xff\xe0rest") == "jpg"
+    assert sniff_image_type(b"GIF89a....") == "gif"
+    assert sniff_image_type(b"RIFF\x10\x00\x00\x00WEBPVP8 ") == "webp"
+    assert sniff_image_type(b"<svg xmlns=...>") is None
+    assert sniff_image_type(b"") is None
+
+
+def test_paste_image_name() -> None:
+    name = paste_image_name("png", datetime(2026, 10, 19, 8, 5, 3))
+    assert name.startswith("paste-20261019-080503-") and name.endswith(".png")
+    assert paste_image_name("png") != paste_image_name("png")
+
+
+async def test_upload_paste(store: Store, tmp_path: Path) -> None:
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    root = tmp_path / "home"
+    root.mkdir()
+    acceptor = await asyncssh.create_server(
+        _TestServer,
+        "127.0.0.1",
+        0,
+        server_host_keys=[key],
+        process_factory=_handle,
+        sftp_factory=lambda chan: asyncssh.SFTPServer(chan, chroot=str(root).encode()),
+    )
+    port = acceptor.sockets[0].getsockname()[1]
+    folder = root / PASTE_DIR
+    folder.mkdir(parents=True)
+    stale = folder / "paste-20260101-000000-aaaaaa.png"
+    recent = folder / "paste-20260101-000000-bbbbbb.png"
+    unrelated = folder / "notes.txt"
+    for path in (stale, recent, unrelated):
+        path.write_bytes(PNG)
+    old = time.time() - PASTE_KEEP_SECONDS - 60
+    os.utime(stale, (old, old))
+    os.utime(unrelated, (old, old))
+    server_id = _add_server(store, port)
+    pool = ConnectionPool(store)
+    try:
+        first = await pool.upload_paste(server_id, PNG, "png")
+        second = await pool.upload_paste(server_id, PNG, "png")
+    finally:
+        await pool.close_all()
+        acceptor.close()
+        await acceptor.wait_closed()
+    assert first != second
+    assert first.startswith(f"/{PASTE_DIR}/paste-") and first.endswith(".png")
+    local = root / first.lstrip("/")
+    assert local.read_bytes() == PNG
+    assert stat.S_IMODE(local.stat().st_mode) == 0o600
+    assert (root / second.lstrip("/")).exists()
+    assert not stale.exists()
+    assert recent.exists() and unrelated.exists()
+
+
+async def test_upload_paste_without_sftp(store: Store) -> None:
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    acceptor = await asyncssh.create_server(
+        _TestServer, "127.0.0.1", 0, server_host_keys=[key], process_factory=_handle
+    )
+    port = acceptor.sockets[0].getsockname()[1]
+    server_id = _add_server(store, port)
+    pool = ConnectionPool(store)
+    try:
+        with pytest.raises(RemotePathError, match="SFTP tidak aktif"):
+            await pool.upload_paste(server_id, PNG, "png")
+    finally:
+        await pool.close_all()
+        acceptor.close()
+        await acceptor.wait_closed()
