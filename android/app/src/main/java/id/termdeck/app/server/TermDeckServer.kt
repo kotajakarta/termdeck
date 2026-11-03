@@ -24,10 +24,15 @@ import id.termdeck.app.data.ServerIn
 import id.termdeck.app.data.ServerOrderIn
 import id.termdeck.app.data.ServerSecrets
 import id.termdeck.app.data.ServerTestIn
+import id.termdeck.app.data.SetupPinIn
 import id.termdeck.app.data.SnippetIn
 import id.termdeck.app.data.StoreBackend
 import id.termdeck.app.data.TooManyAttemptsException
 import id.termdeck.app.data.Vault
+import id.termdeck.app.data.AndroidUpdater
+import id.termdeck.app.data.UpdateApplyResult
+import id.termdeck.app.data.UpdateCheckResult
+import id.termdeck.app.data.UpdateProgressResult
 import id.termdeck.app.data.generateRandomToken
 import id.termdeck.app.ssh.MAX_PASTE_BYTES
 import id.termdeck.app.ssh.MAX_UPLOAD_FILE_BYTES
@@ -128,7 +133,9 @@ fun Application.configureTermDeckModule(
     token: String,
     assetLoader: (String) -> ByteArray? = { null },
     allowedHosts: Set<String>? = LOCAL_HOSTS,
-    onTerminalCountChanged: (Int) -> Unit = {}
+    onTerminalCountChanged: (Int) -> Unit = {},
+    cfHttpClient: (suspend (method: String, path: String, token: String, body: String?) -> kotlinx.serialization.json.JsonElement)? = null,
+    updater: AndroidUpdater? = null
 ) {
     install(ContentNegotiation) {
         json(AppJson)
@@ -166,7 +173,7 @@ fun Application.configureTermDeckModule(
         }
     }
 
-    fun requireUnlocked(call: ApplicationCall): Pair<StoreBackend, SshPoolBackend> {
+    fun requireUnlockedBase(call: ApplicationCall): Triple<StoreBackend, SshPoolBackend, String> {
         requireToken(call)
         val xSession = call.request.header("X-Session")
             ?: call.request.queryParameters["session"]
@@ -175,6 +182,14 @@ fun Application.configureTermDeckModule(
         val p = vault.pool
         if (!vault.checkSession(xSession) || s == null || p == null) {
             throw HttpError(HttpStatusCode.Unauthorized, "Sesi berakhir. Masukkan PIN lagi.")
+        }
+        return Triple(s, p, xSession)
+    }
+
+    fun requireUnlocked(call: ApplicationCall): Pair<StoreBackend, SshPoolBackend> {
+        val (s, p, xSession) = requireUnlockedBase(call)
+        if (vault.needsPinChange(xSession)) {
+            throw HttpError(HttpStatusCode.Forbidden, "Wajib mengganti PIN sebelum mengakses data.")
         }
         return s to p
     }
@@ -205,24 +220,48 @@ fun Application.configureTermDeckModule(
             get("/auth/status") {
                 handleApi(call) {
                     requireToken(call)
-                    val xSession = call.request.header("X-Session") ?: ""
+                    val xSession = call.request.header("X-Session")
+                        ?: call.request.queryParameters["session"]
+                        ?: ""
                     call.respond(
                         AuthStatus(
                             unlocked = vault.unlocked,
-                            sessionValid = vault.checkSession(xSession)
+                            sessionValid = vault.checkSession(xSession),
+                            initialized = vault.isInitialized,
+                            mustChangePin = vault.needsPinChange(xSession)
                         )
                     )
+                }
+            }
+
+            post("/auth/setup-pin") {
+                handleApi(call) {
+                    requireToken(call)
+                    if (vault.isInitialized) {
+                        throw HttpError(HttpStatusCode.BadRequest, "Vault sudah diinisialisasi. Silakan login.")
+                    }
+                    val body = call.receive<SetupPinIn>()
+                    val session = withContext(Dispatchers.IO) {
+                        vault.setupPin(body.pin)
+                    }
+                    call.respond(LoginOut(session = session, mustChangePin = false))
                 }
             }
 
             post("/auth/login") {
                 handleApi(call) {
                     requireToken(call)
+                    if (!vault.isInitialized) {
+                        throw HttpError(
+                            HttpStatusCode.BadRequest,
+                            "Vault belum diinisialisasi. Silakan buat PIN terlebih dahulu."
+                        )
+                    }
                     val body = call.receive<LoginIn>()
                     val session = withContext(Dispatchers.IO) {
                         vault.unlock(body.pin)
                     }
-                    call.respond(LoginOut(session = session))
+                    call.respond(LoginOut(session = session, mustChangePin = vault.needsPinChange(session)))
                 }
             }
 
@@ -236,10 +275,10 @@ fun Application.configureTermDeckModule(
 
             post("/auth/change-pin") {
                 handleApi(call) {
-                    requireUnlocked(call)
+                    val (_, _, session) = requireUnlockedBase(call)
                     val body = call.receive<ChangePinIn>()
                     withContext(Dispatchers.IO) {
-                        vault.changePin(body.oldPin, body.newPin)
+                        vault.changePin(body.oldPin, body.newPin, session)
                     }
                     call.respond(HttpStatusCode.NoContent)
                 }
@@ -718,6 +757,60 @@ fun Application.configureTermDeckModule(
                         ?: throw HttpError(HttpStatusCode.NotFound, "Server tidak ditemukan")
                 }
             )
+
+            registerCloudflareRoutes(
+                handleApiFn = { call, block -> handleApi(call, block) },
+                requireUnlockedFn = { call -> requireUnlocked(call) },
+                cfHttpClient = cfHttpClient
+            )
+
+            get("/system/update-check") {
+                handleApi(call) {
+                    requireUnlocked(call)
+                    val result = updater?.checkUpdate() ?: UpdateCheckResult(
+                        platform = "android",
+                        current_version = "1.0.0",
+                        latest_version = "1.0.0",
+                        has_update = false,
+                        release_title = "TermDeck Android",
+                        release_notes = "Aplikasi versi terbaru",
+                        download_url = null
+                    )
+                    call.respond(HttpStatusCode.OK, result)
+                }
+            }
+
+            post("/system/update-apply") {
+                handleApi(call) {
+                    requireUnlocked(call)
+                    val result = if (updater != null) {
+                        val check = updater.checkUpdate()
+                        if (check.download_url != null) {
+                            updater.startDownload(check.download_url)
+                            UpdateApplyResult(started = true, message = "Pengunduhan pembaruan dimulai.")
+                        } else {
+                            UpdateApplyResult(started = false, message = "URL unduhan APK tidak ditemukan.")
+                        }
+                    } else {
+                        UpdateApplyResult(started = true, message = "Pembaruan dimulai.")
+                    }
+                    call.respond(HttpStatusCode.OK, result)
+                }
+            }
+
+            get("/system/update-progress") {
+                handleApi(call) {
+                    requireUnlocked(call)
+                    val result = updater?.getProgress() ?: UpdateProgressResult(
+                        state = "idle",
+                        progress_percent = 0,
+                        downloaded_bytes = 0L,
+                        total_bytes = 0L,
+                        message = "Tidak ada pembaruan aktif."
+                    )
+                    call.respond(HttpStatusCode.OK, result)
+                }
+            }
         }
 
         webSocket("/ws/terminal") {
@@ -732,6 +825,7 @@ fun Application.configureTermDeckModule(
             val pool = vault.pool
             if (serverId == null ||
                 !vault.checkSession(sessionToken) ||
+                vault.needsPinChange(sessionToken) ||
                 store == null ||
                 pool == null ||
                 !originAllowed(origin, allowedHosts)
@@ -917,7 +1011,8 @@ private fun contentTypeForPath(path: String): ContentType {
 class TermDeckServer(
     private val vault: Vault,
     private val assetLoader: (String) -> ByteArray?,
-    private val onTerminalCountChanged: (Int) -> Unit = {}
+    private val onTerminalCountChanged: (Int) -> Unit = {},
+    private val updater: AndroidUpdater? = null
 ) {
     val token: String = generateRandomToken(32)
     private var engine: CIOApplicationEngine? = null
@@ -938,7 +1033,8 @@ class TermDeckServer(
                 token = token,
                 assetLoader = assetLoader,
                 allowedHosts = LOCAL_HOSTS,
-                onTerminalCountChanged = onTerminalCountChanged
+                onTerminalCountChanged = onTerminalCountChanged,
+                updater = updater
             )
         }
         server.start(wait = false)

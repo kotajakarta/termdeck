@@ -45,6 +45,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import id.termdeck.app.data.DEFAULT_INITIAL_PIN
 import id.termdeck.app.data.Vault
+import id.termdeck.app.data.AndroidUpdater
 import id.termdeck.app.server.TermDeckServer
 import java.io.File
 import java.lang.ref.WeakReference
@@ -689,7 +690,8 @@ class MainActivity : ComponentActivity() {
                             appContext.stopService(serviceIntent)
                         }
                     }
-                }
+                },
+                updater = AndroidUpdater(appContext)
             )
             created.start()
             sharedServer = created
