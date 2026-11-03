@@ -7,6 +7,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
 logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "kotajakarta/termdeck"
@@ -167,3 +169,33 @@ class DesktopUpdater:
             "started": True,
             "message": self._message,
         }
+
+
+_updater_instance: DesktopUpdater | None = None
+
+
+def get_desktop_updater() -> DesktopUpdater:
+    global _updater_instance
+    if _updater_instance is None:
+        _updater_instance = DesktopUpdater()
+    return _updater_instance
+
+
+def register_updater_routes(router: APIRouter, unlocked_dep: Any) -> None:
+    updater = get_desktop_updater()
+
+    @router.get("/system/update-check")
+    async def update_check(_: Any = Depends(unlocked_dep)) -> dict[str, Any]:
+        return await updater.check_update()
+
+    @router.post("/system/update-apply")
+    async def update_apply(_: Any = Depends(unlocked_dep)) -> dict[str, Any]:
+        try:
+            return await updater.apply_update()
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+
+    @router.get("/system/update-progress")
+    async def update_progress(_: Any = Depends(unlocked_dep)) -> dict[str, Any]:
+        return updater.get_progress()
+

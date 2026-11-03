@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from .containers_api import register_containers_routes
 from .cloudflare_api import register_cloudflare_routes
+from .updater import register_updater_routes
 from .backup import (
     InvalidBackupError,
     InvalidBackupPinError,
@@ -71,8 +72,13 @@ class LoginIn(BaseModel):
     pin: str
 
 
+class SetupPinIn(BaseModel):
+    pin: str
+
+
 class LoginOut(BaseModel):
     session: str
+    must_change_pin: bool = False
 
 
 class ChangePinIn(BaseModel):
@@ -83,6 +89,8 @@ class ChangePinIn(BaseModel):
 class AuthStatus(BaseModel):
     unlocked: bool
     session_valid: bool
+    initialized: bool = True
+    must_change_pin: bool = False
 
 
 class ServerOrderIn(BaseModel):
@@ -133,12 +141,21 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
         if not pysecrets.compare_digest(candidate.encode(), token.encode()):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token tidak valid")
 
-    def unlocked(request: Request, x_session: str = Header(default="")) -> Unlocked:
+    def unlocked_base(request: Request, x_session: str = Header(default="")) -> tuple[Unlocked, str]:
         candidate_session = x_session or request.query_params.get("session", "")
         store, pool = vault.store, vault.pool
         if not vault.check_session(candidate_session) or store is None or pool is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sesi berakhir. Masukkan PIN lagi.")
-        return Unlocked(store=store, pool=pool)
+        return Unlocked(store=store, pool=pool), candidate_session
+
+    def unlocked(request: Request, x_session: str = Header(default="")) -> Unlocked:
+        ctx, session = unlocked_base(request, x_session)
+        if vault.needs_pin_change(session):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Wajib mengganti PIN sebelum mengakses data.")
+        return ctx
+
+    def unlocked_pin_change(request: Request, x_session: str = Header(default="")) -> tuple[Unlocked, str]:
+        return unlocked_base(request, x_session)
 
     router = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
@@ -152,16 +169,38 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
 
     @router.get("/auth/status")
     async def auth_status(x_session: str = Header(default="")) -> AuthStatus:
-        return AuthStatus(unlocked=vault.unlocked, session_valid=vault.check_session(x_session))
+        candidate_session = x_session
+        return AuthStatus(
+            unlocked=vault.unlocked,
+            session_valid=vault.check_session(candidate_session),
+            initialized=vault.is_initialized,
+            must_change_pin=vault.needs_pin_change(candidate_session),
+        )
+
+    @router.post("/auth/setup-pin")
+    async def setup_pin(data: SetupPinIn) -> LoginOut:
+        if vault.is_initialized:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Vault sudah diinisialisasi. Silakan login.")
+        try:
+            session = await asyncio.to_thread(vault.setup_pin, data.pin)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        return LoginOut(session=session, must_change_pin=False)
 
     @router.post("/auth/login")
     async def login(data: LoginIn) -> LoginOut:
+        if not vault.is_initialized:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Vault belum diinisialisasi. Silakan buat PIN terlebih dahulu."
+            )
         try:
             # scrypt + opening the database take ~150 ms: keep the event loop free.
             session = await asyncio.to_thread(vault.unlock, data.pin)
         except (InvalidPin, TooManyAttempts) as exc:
             raise pin_error(exc) from exc
-        return LoginOut(session=session)
+        return LoginOut(session=session, must_change_pin=vault.needs_pin_change(session))
 
     @router.post("/auth/lock", status_code=status.HTTP_204_NO_CONTENT)
     async def lock(_: Unlocked = Depends(unlocked)) -> Response:
@@ -176,9 +215,13 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.post("/auth/change-pin", status_code=status.HTTP_204_NO_CONTENT)
-    async def change_pin(data: ChangePinIn, _: Unlocked = Depends(unlocked)) -> Response:
+    async def change_pin(
+        data: ChangePinIn,
+        ctx_session: tuple[Unlocked, str] = Depends(unlocked_pin_change),
+    ) -> Response:
+        _, session = ctx_session
         try:
-            await asyncio.to_thread(vault.change_pin, data.old_pin, data.new_pin)
+            await asyncio.to_thread(vault.change_pin, data.old_pin, data.new_pin, session)
         except (InvalidPin, TooManyAttempts) as exc:
             raise pin_error(exc) from exc
         except ValueError as exc:
@@ -487,6 +530,7 @@ def create_api_router(vault: Vault, token: str) -> APIRouter:
     register_files_routes(router, unlocked)
     register_containers_routes(router, unlocked)
     register_cloudflare_routes(router, unlocked)
+    register_updater_routes(router, unlocked)
 
     return router
 
@@ -513,6 +557,7 @@ def create_ws_router(vault: Vault, allowed_hosts: list[str] | None = None) -> AP
         session = ws.query_params.get("session", "")
         if (
             not vault.check_session(session)
+            or vault.needs_pin_change(session)
             or store is None
             or pool is None
             or not origin_allowed(ws.headers.get("origin"), allowed_hosts)
