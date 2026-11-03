@@ -24,6 +24,13 @@ fun validatePin(pin: String) {
     }
 }
 
+fun validateNewPin(pin: String) {
+    validatePin(pin)
+    if (pin == DEFAULT_INITIAL_PIN) {
+        throw IllegalArgumentException("PIN tidak boleh menggunakan PIN default lama.")
+    }
+}
+
 fun deriveVaultKey(pin: String, salt: ByteArray): ByteArray {
     return SCrypt.generate(
         pin.toByteArray(Charsets.UTF_8),

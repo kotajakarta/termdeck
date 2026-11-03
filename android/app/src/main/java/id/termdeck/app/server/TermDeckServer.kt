@@ -784,12 +784,19 @@ fun Application.configureTermDeckModule(
                 handleApi(call) {
                     requireUnlocked(call)
                     val result = if (updater != null) {
-                        val check = updater.checkUpdate()
-                        if (check.download_url != null) {
-                            updater.startDownload(check.download_url)
-                            UpdateApplyResult(started = true, message = "Pengunduhan pembaruan dimulai.")
+                        val prog = updater.getProgress()
+                        val apkFile = java.io.File(updater.context.cacheDir, "updates/termdeck-update.apk")
+                        if (prog.state == "ready" || (apkFile.exists() && apkFile.length() > 0)) {
+                            val ok = updater.installApk()
+                            UpdateApplyResult(started = ok, message = updater.getProgress().message)
                         } else {
-                            UpdateApplyResult(started = false, message = "URL unduhan APK tidak ditemukan.")
+                            val check = updater.checkUpdate()
+                            if (check.download_url != null) {
+                                updater.startDownload(check.download_url)
+                                UpdateApplyResult(started = true, message = "Pengunduhan pembaruan dimulai.")
+                            } else {
+                                UpdateApplyResult(started = false, message = "URL unduhan APK tidak ditemukan.")
+                            }
                         }
                     } else {
                         UpdateApplyResult(started = true, message = "Pembaruan dimulai.")

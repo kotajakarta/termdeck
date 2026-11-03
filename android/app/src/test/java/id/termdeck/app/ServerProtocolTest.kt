@@ -22,17 +22,32 @@ import id.termdeck.app.data.ServerOut
 import id.termdeck.app.data.ServerSecrets
 import id.termdeck.app.data.ServerStats
 import id.termdeck.app.data.ServerTestIn
+import id.termdeck.app.data.SetupPinIn
 import id.termdeck.app.data.SnippetIn
+import id.termdeck.app.data.DB_FILE
+import id.termdeck.app.data.SALT_FILE
+import id.termdeck.app.data.deriveVaultKey
 import id.termdeck.app.data.SnippetOut
 import id.termdeck.app.data.StoreBackend
 import id.termdeck.app.data.Vault
 import id.termdeck.app.data.WrongKeyException
+import id.termdeck.app.data.CFAccountIn
+import id.termdeck.app.data.CFAccountOut
+import id.termdeck.app.data.CFAccountUpdateIn
+import id.termdeck.app.data.CFAccountVerifyIn
+import id.termdeck.app.data.CFAccountWithSecret
+import id.termdeck.app.data.CFRouteIn
+import id.termdeck.app.data.maskCfToken
 import id.termdeck.app.data.validateBookmarkIn
+import id.termdeck.app.data.validateCfAccountIn
 import id.termdeck.app.data.validateServerIn
 import id.termdeck.app.data.validateSnippetIn
 import id.termdeck.app.server.AppJson
 import id.termdeck.app.server.configureTermDeckModule
 import id.termdeck.app.ssh.ExecProcess
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import id.termdeck.app.ssh.ExecResult
 import id.termdeck.app.ssh.HostKeyMismatch
 import id.termdeck.app.ssh.SshPoolBackend
@@ -238,6 +253,64 @@ class InMemoryStore(
     }
 
     override fun deleteSnippet(snippetId: Int): Boolean = snippets.removeIf { it.id == snippetId }
+
+    private data class CfAccountRow(
+        val id: Int,
+        var name: String,
+        var token: String,
+        var accountId: String,
+        var accountName: String,
+        val createdAt: String = "2026-11-02 12:00:00"
+    ) {
+        fun toOut() = CFAccountOut(
+            id = id,
+            name = name,
+            tokenMasked = maskCfToken(token),
+            accountId = accountId,
+            accountName = accountName,
+            createdAt = createdAt
+        )
+        fun toSecret() = CFAccountWithSecret(
+            id = id,
+            name = name,
+            token = token,
+            tokenMasked = maskCfToken(token),
+            accountId = accountId,
+            accountName = accountName,
+            createdAt = createdAt
+        )
+    }
+
+    private val cfAccounts = mutableListOf<CfAccountRow>()
+    private var nextCfAccountId = 1
+
+    override fun listCfAccounts(): List<CFAccountOut> = cfAccounts.map { it.toOut() }
+
+    override fun getCfAccount(id: Int): CFAccountWithSecret? = cfAccounts.find { it.id == id }?.toSecret()
+
+    override fun createCfAccount(name: String, token: String, accountId: String, accountName: String): CFAccountOut {
+        validateCfAccountIn(name, token)
+        val row = CfAccountRow(nextCfAccountId++, name, token, accountId, accountName)
+        cfAccounts.add(row)
+        return row.toOut()
+    }
+
+    override fun updateCfAccount(id: Int, name: String, token: String?, accountId: String?, accountName: String?): CFAccountOut? {
+        val row = cfAccounts.find { it.id == id } ?: return null
+        val cleanToken = token?.trim()?.ifEmpty { null }
+        if (cleanToken != null) {
+            validateCfAccountIn(name, cleanToken)
+            row.token = cleanToken
+            if (accountId != null) row.accountId = accountId
+            if (accountName != null) row.accountName = accountName
+        } else {
+            require(name.isNotBlank() && name.length <= 100) { "Nama akun Cloudflare wajib diisi." }
+        }
+        row.name = name.trim()
+        return row.toOut()
+    }
+
+    override fun deleteCfAccount(id: Int): Boolean = cfAccounts.removeIf { it.id == id }
 
     override fun rekey(newKey: ByteArray) {
         currentKey = newKey.copyOf()
@@ -460,25 +533,43 @@ class ServerProtocolTest {
         val noTokenRes = client.get("/api/auth/status")
         assertEquals(HttpStatusCode.Unauthorized, noTokenRes.status)
 
-        // Wrong PIN -> 403
-        val wrongLogin = client.post("/api/auth/login") {
+        // Status before setup -> initialized = false
+        val preStatusRes = client.get("/api/auth/status") {
             header("X-Token", token)
-            contentType(ContentType.Application.Json)
-            setBody("""{"pin":"0000"}""")
         }
-        assertEquals(HttpStatusCode.Forbidden, wrongLogin.status)
+        val preStatus = AppJson.decodeFromString<AuthStatus>(preStatusRes.bodyAsText())
+        assertFalse(preStatus.initialized)
+        assertFalse(preStatus.unlocked)
 
-        // Correct PIN -> 200 + session
-        val okLogin = client.post("/api/auth/login") {
+        // Login before setup -> 400
+        val prematureLogin = client.post("/api/auth/login") {
             header("X-Token", token)
             contentType(ContentType.Application.Json)
-            setBody(AppJson.encodeToString(LoginIn("7821724")))
+            setBody(AppJson.encodeToString(LoginIn("123456")))
         }
-        assertEquals(HttpStatusCode.OK, okLogin.status)
-        val session = AppJson.decodeFromString<LoginOut>(okLogin.bodyAsText()).session
+        assertEquals(HttpStatusCode.BadRequest, prematureLogin.status)
+
+        // Setup with default PIN 7821724 -> 422
+        val badSetup = client.post("/api/auth/setup-pin") {
+            header("X-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(SetupPinIn("7821724")))
+        }
+        assertEquals(HttpStatusCode.UnprocessableEntity, badSetup.status)
+
+        // Setup with valid custom PIN -> 200 + session
+        val okSetup = client.post("/api/auth/setup-pin") {
+            header("X-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(SetupPinIn("123456")))
+        }
+        assertEquals(HttpStatusCode.OK, okSetup.status)
+        val setupOut = AppJson.decodeFromString<LoginOut>(okSetup.bodyAsText())
+        val session = setupOut.session
         assertTrue(session.isNotBlank())
+        assertFalse(setupOut.mustChangePin)
 
-        // Status shows unlocked + session_valid
+        // Status shows unlocked + session_valid + initialized
         val statusRes = client.get("/api/auth/status") {
             header("X-Token", token)
             header("X-Session", session)
@@ -486,13 +577,23 @@ class ServerProtocolTest {
         val status = AppJson.decodeFromString<AuthStatus>(statusRes.bodyAsText())
         assertTrue(status.unlocked)
         assertTrue(status.sessionValid)
+        assertTrue(status.initialized)
+        assertFalse(status.mustChangePin)
 
-        // Change PIN
+        // Duplicate setup rejected -> 400
+        val dupSetup = client.post("/api/auth/setup-pin") {
+            header("X-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(SetupPinIn("654321")))
+        }
+        assertEquals(HttpStatusCode.BadRequest, dupSetup.status)
+
+        // Change PIN to 654321
         val changeRes = client.post("/api/auth/change-pin") {
             header("X-Token", token)
             header("X-Session", session)
             contentType(ContentType.Application.Json)
-            setBody(AppJson.encodeToString(ChangePinIn("7821724", "123456")))
+            setBody(AppJson.encodeToString(ChangePinIn("123456", "654321")))
         }
         assertEquals(HttpStatusCode.NoContent, changeRes.status)
 
@@ -507,16 +608,96 @@ class ServerProtocolTest {
         val oldPinRes = client.post("/api/auth/login") {
             header("X-Token", token)
             contentType(ContentType.Application.Json)
-            setBody(AppJson.encodeToString(LoginIn("7821724")))
+            setBody(AppJson.encodeToString(LoginIn("123456")))
         }
         assertEquals(HttpStatusCode.Forbidden, oldPinRes.status)
 
         val newPinRes = client.post("/api/auth/login") {
             header("X-Token", token)
             contentType(ContentType.Application.Json)
-            setBody(AppJson.encodeToString(LoginIn("123456")))
+            setBody(AppJson.encodeToString(LoginIn("654321")))
         }
         assertEquals(HttpStatusCode.OK, newPinRes.status)
+    }
+
+    @Test
+    fun `legacy default PIN enforces must_change_pin and 403 on data routes`() = testApplication {
+        val dir = tempFolder.newFolder("vault_legacy")
+        val fakePool = FakeSshPool()
+        // Pre-create database with legacy PIN 7821724
+        val dbFile = File(dir, DB_FILE)
+        val salt = ByteArray(32) { it.toByte() }
+        File(dir, SALT_FILE).writeBytes(salt)
+        val key = deriveVaultKey("7821724", salt)
+        val memStore = InMemoryStore(dbFile, key)
+        memStore.createServer(ServerIn(name = "srv1", host = "10.0.0.1", username = "root"))
+
+        val vault = Vault(
+            folder = dir,
+            storeFactory = { f, k -> InMemoryStore(f, k) },
+            poolFactory = { fakePool }
+        )
+        val token = "test-secret-token"
+
+        application {
+            configureTermDeckModule(
+                vault = vault,
+                token = token,
+                assetLoader = { null },
+                allowedHosts = null
+            )
+        }
+
+        // Login with legacy default PIN
+        val loginRes = client.post("/api/auth/login") {
+            header("X-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(LoginIn("7821724")))
+        }
+        assertEquals(HttpStatusCode.OK, loginRes.status)
+        val loginOut = AppJson.decodeFromString<LoginOut>(loginRes.bodyAsText())
+        assertTrue(loginOut.mustChangePin)
+        val session = loginOut.session
+
+        // Status shows mustChangePin = true
+        val statusRes = client.get("/api/auth/status") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        val status = AppJson.decodeFromString<AuthStatus>(statusRes.bodyAsText())
+        assertTrue(status.mustChangePin)
+
+        // Accessing data route -> 403 Forbidden
+        val serversRes = client.get("/api/servers") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.Forbidden, serversRes.status)
+        assertTrue(serversRes.bodyAsText().contains("Wajib mengganti PIN"))
+
+        // Change PIN to 987654
+        val changeRes = client.post("/api/auth/change-pin") {
+            header("X-Token", token)
+            header("X-Session", session)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(ChangePinIn("7821724", "987654")))
+        }
+        assertEquals(HttpStatusCode.NoContent, changeRes.status)
+
+        // Status shows mustChangePin = false
+        val statusAfterRes = client.get("/api/auth/status") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertFalse(AppJson.decodeFromString<AuthStatus>(statusAfterRes.bodyAsText()).mustChangePin)
+
+        // Data routes now accessible -> 200 OK
+        val serversAfterRes = client.get("/api/servers") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, serversAfterRes.status)
+        assertEquals("[]", serversAfterRes.bodyAsText().trim())
     }
 
     @Test
@@ -525,7 +706,6 @@ class ServerProtocolTest {
         val fakePool = FakeSshPool()
         val vault = Vault(
             folder = dir,
-            initialPin = "7821724",
             storeFactory = { f, k -> InMemoryStore(f, k) },
             poolFactory = { fakePool }
         )
@@ -536,10 +716,10 @@ class ServerProtocolTest {
         }
 
         val session = AppJson.decodeFromString<LoginOut>(
-            client.post("/api/auth/login") {
+            client.post("/api/auth/setup-pin") {
                 header("X-Token", token)
                 contentType(ContentType.Application.Json)
-                setBody("""{"pin":"7821724"}""")
+                setBody(AppJson.encodeToString(SetupPinIn("123456")))
             }.bodyAsText()
         ).session
 
@@ -752,5 +932,164 @@ class ServerProtocolTest {
         }
         assertEquals(HttpStatusCode.OK, imagesRes.status)
         assertTrue(imagesRes.bodyAsText().contains(""""repository":"docker.io/library/nginx""""))
+    }
+
+    @Test
+    fun `cloudflare routes verify create list update tunnels zones and routes`() = testApplication {
+        val dir = tempFolder.newFolder("vault_cf")
+        val fakePool = FakeSshPool()
+        val vault = Vault(
+            folder = dir,
+            initialPin = "7821724",
+            storeFactory = { f, k -> InMemoryStore(f, k) },
+            poolFactory = { fakePool }
+        )
+        val token = "test-token-cf"
+
+        val mockCfAccounts = """{"success":true,"result":[{"id":"acc-123","name":"My Cloudflare Account"}]}"""
+        val mockCfZones = """{"success":true,"result":[{"id":"zone-xyz","name":"example.com","status":"active"}]}"""
+        val mockCfDns = """{"success":true,"result":[]}"""
+        val mockCfTunnels = """{"success":true,"result":[{"id":"tun-abc","name":"termdeck-tun","status":"healthy","connections":[{"colo_name":"cgk01"}],"created_at":"2026-01-01T00:00:00Z","remote_config":true}]}"""
+        val mockCfConfig = """{"success":true,"result":{"config":{"ingress":[{"hostname":"old.example.com","service":"http://localhost:3000"},{"service":"http_status:404"}]}}}"""
+        val mockCfToken = """{"success":true,"result":"cf-tunnel-token-secret-123"}"""
+
+        val mockHttpClient: suspend (String, String, String, String?) -> kotlinx.serialization.json.JsonElement = { _, path, _, _ ->
+            when {
+                path == "/accounts" -> AppJson.parseToJsonElement(mockCfAccounts)
+                path.startsWith("/zones") && path.contains("dns_records") -> AppJson.parseToJsonElement(mockCfDns)
+                path.startsWith("/zones") -> AppJson.parseToJsonElement(mockCfZones)
+                path.contains("/cfd_tunnel") && path.endsWith("/token") -> AppJson.parseToJsonElement(mockCfToken)
+                path.contains("/cfd_tunnel") && path.endsWith("/configurations") -> AppJson.parseToJsonElement(mockCfConfig)
+                path.contains("/cfd_tunnel") -> AppJson.parseToJsonElement(mockCfTunnels)
+                else -> AppJson.parseToJsonElement("""{"success":true,"result":[]}""")
+            }
+        }
+
+        application {
+            configureTermDeckModule(
+                vault = vault,
+                token = token,
+                allowedHosts = null,
+                cfHttpClient = mockHttpClient
+            )
+        }
+
+        // Setup PIN first
+        val setupRes = client.post("/api/auth/setup-pin") {
+            header("X-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(SetupPinIn("123456")))
+        }
+        val session = AppJson.decodeFromString<LoginOut>(setupRes.bodyAsText()).session
+
+        // 1. Verify token
+        val verifyRes = client.post("/api/cf/accounts/verify") {
+            header("X-Token", token)
+            header("X-Session", session)
+            contentType(ContentType.Application.Json)
+            setBody("""{"token":"mock_cf_token_testing_only_4860"}""")
+        }
+        assertEquals(HttpStatusCode.OK, verifyRes.status)
+        val verifyJson = AppJson.parseToJsonElement(verifyRes.bodyAsText()).jsonObject
+        assertEquals("acc-123", verifyJson["account_id"]?.jsonPrimitive?.content)
+        assertEquals("My Cloudflare Account", verifyJson["account_name"]?.jsonPrimitive?.content)
+        assertTrue(verifyJson["has_dns_access"]?.jsonPrimitive?.booleanOrNull == true)
+
+        // 2. Create CF Account
+        val createRes = client.post("/api/cf/accounts") {
+            header("X-Token", token)
+            header("X-Session", session)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(CFAccountIn(name = "Main Org", token = "mock_cf_token_testing_only_4860")))
+        }
+        assertEquals(HttpStatusCode.OK, createRes.status)
+        val createdAcc = AppJson.decodeFromString<CFAccountOut>(createRes.bodyAsText())
+        assertEquals("Main Org", createdAcc.name)
+        assertEquals("acc-123", createdAcc.accountId)
+        assertEquals("mock_...4860", createdAcc.tokenMasked)
+
+        // 3. List CF Accounts
+        val listRes = client.get("/api/cf/accounts") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, listRes.status)
+        val accs = AppJson.decodeFromString<List<CFAccountOut>>(listRes.bodyAsText())
+        assertEquals(1, accs.size)
+        assertEquals(createdAcc.id, accs[0].id)
+
+        // 4. Update CF Account
+        val updateRes = client.put("/api/cf/accounts/${createdAcc.id}") {
+            header("X-Token", token)
+            header("X-Session", session)
+            contentType(ContentType.Application.Json)
+            setBody("""{"name":"Renamed Org"}""")
+        }
+        assertEquals(HttpStatusCode.OK, updateRes.status)
+        val updatedAcc = AppJson.decodeFromString<CFAccountOut>(updateRes.bodyAsText())
+        assertEquals("Renamed Org", updatedAcc.name)
+
+        // 5. List Tunnels
+        val tunRes = client.get("/api/cf/accounts/${createdAcc.id}/tunnels") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, tunRes.status)
+        assertTrue(tunRes.bodyAsText().contains("termdeck-tun"))
+
+        // 6. List Zones
+        val zoneRes = client.get("/api/cf/accounts/${createdAcc.id}/zones") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, zoneRes.status)
+        assertTrue(zoneRes.bodyAsText().contains("example.com"))
+
+        // 7. List Tunnel Routes
+        val routesRes = client.get("/api/cf/accounts/${createdAcc.id}/tunnels/tun-abc/routes") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, routesRes.status)
+        assertTrue(routesRes.bodyAsText().contains("old.example.com"))
+
+        // 8. Add Tunnel Route
+        val addRouteRes = client.post("/api/cf/accounts/${createdAcc.id}/tunnels/tun-abc/routes") {
+            header("X-Token", token)
+            header("X-Session", session)
+            contentType(ContentType.Application.Json)
+            setBody(AppJson.encodeToString(CFRouteIn(hostname = "term.example.com", service = "http://localhost:8080", zoneId = "zone-xyz")))
+        }
+        assertEquals(HttpStatusCode.OK, addRouteRes.status)
+        assertTrue(addRouteRes.bodyAsText().contains("term.example.com"))
+
+        // 9. Delete Tunnel Route
+        val delRouteRes = client.delete("/api/cf/accounts/${createdAcc.id}/tunnels/tun-abc/routes?hostname=term.example.com&zone_id=zone-xyz") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, delRouteRes.status)
+        assertTrue(delRouteRes.bodyAsText().contains(""""deleted":"term.example.com""""))
+
+        // 10. Get Tunnel Token
+        val tokenRes = client.get("/api/cf/accounts/${createdAcc.id}/tunnels/tun-abc/token") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, tokenRes.status)
+        assertTrue(tokenRes.bodyAsText().contains("cf-tunnel-token-secret-123"))
+
+        // 11. Delete Account
+        val delAccRes = client.delete("/api/cf/accounts/${createdAcc.id}") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        assertEquals(HttpStatusCode.OK, delAccRes.status)
+        val emptyListRes = client.get("/api/cf/accounts") {
+            header("X-Token", token)
+            header("X-Session", session)
+        }
+        val emptyAccs = AppJson.decodeFromString<List<CFAccountOut>>(emptyListRes.bodyAsText())
+        assertEquals(0, emptyAccs.size)
     }
 }

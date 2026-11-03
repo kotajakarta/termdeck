@@ -4,6 +4,7 @@ import id.termdeck.app.data.PinThrottle
 import id.termdeck.app.data.TooManyAttemptsException
 import id.termdeck.app.data.deriveVaultKey
 import id.termdeck.app.data.rawKeyPassphrase
+import id.termdeck.app.data.validateNewPin
 import id.termdeck.app.data.validatePin
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -22,6 +23,12 @@ class PinLogicTest {
         assertThrows(IllegalArgumentException::class.java) { validatePin("123") }
         assertThrows(IllegalArgumentException::class.java) { validatePin("1234567890123") }
         assertThrows(IllegalArgumentException::class.java) { validatePin("12a4") }
+    }
+
+    @Test
+    fun `validateNewPin rejects legacy default PIN 7821724`() {
+        validateNewPin("123456")
+        assertThrows(IllegalArgumentException::class.java) { validateNewPin("7821724") }
     }
 
     @Test

@@ -29,6 +29,12 @@ interface StoreBackend {
     fun updateSnippet(snippetId: Int, data: SnippetIn): SnippetOut?
     fun deleteSnippet(snippetId: Int): Boolean
 
+    fun listCfAccounts(): List<CFAccountOut>
+    fun getCfAccount(id: Int): CFAccountWithSecret?
+    fun createCfAccount(name: String, token: String, accountId: String, accountName: String): CFAccountOut
+    fun updateCfAccount(id: Int, name: String, token: String? = null, accountId: String? = null, accountName: String? = null): CFAccountOut?
+    fun deleteCfAccount(id: Int): Boolean
+
     fun rekey(newKey: ByteArray)
     fun close()
 }
@@ -68,6 +74,16 @@ private val SCHEMA_STATEMENTS = listOf(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         command TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """.trimIndent(),
+    """
+    CREATE TABLE IF NOT EXISTS cf_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        token TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        account_name TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """.trimIndent()
@@ -388,6 +404,58 @@ class Store(dbFile: File, key: ByteArray) : StoreBackend {
         db.delete("snippets", "id = ?", arrayOf(snippetId.toString())) > 0
     }
 
+    override fun listCfAccounts(): List<CFAccountOut> = synchronized(lock) {
+        val result = mutableListOf<CFAccountOut>()
+        db.rawQuery("SELECT id, name, token, account_id, account_name, created_at FROM cf_accounts ORDER BY id ASC", null).use { c ->
+            while (c.moveToNext()) {
+                result.add(readCfAccountOut(c))
+            }
+        }
+        result
+    }
+
+    override fun getCfAccount(id: Int): CFAccountWithSecret? = synchronized(lock) {
+        db.rawQuery("SELECT id, name, token, account_id, account_name, created_at FROM cf_accounts WHERE id = ?", arrayOf(id.toString())).use { c ->
+            if (c.moveToNext()) readCfAccountWithSecret(c) else null
+        }
+    }
+
+    override fun createCfAccount(name: String, token: String, accountId: String, accountName: String): CFAccountOut = synchronized(lock) {
+        validateCfAccountIn(name, token)
+        val cv = ContentValues().apply {
+            put("name", name.trim())
+            put("token", token.trim())
+            put("account_id", accountId.trim())
+            put("account_name", accountName.trim())
+        }
+        val id = db.insertOrThrow("cf_accounts", null, cv).toInt()
+        getCfAccount(id)?.toOut() ?: error("Failed to insert cf_account")
+    }
+
+    override fun updateCfAccount(id: Int, name: String, token: String?, accountId: String?, accountName: String?): CFAccountOut? = synchronized(lock) {
+        if (getCfAccount(id) == null) return null
+        val cleanToken = token?.trim()?.ifEmpty { null }
+        if (cleanToken != null) {
+            validateCfAccountIn(name, cleanToken)
+        } else {
+            require(name.isNotBlank() && name.length <= 100) { "Nama akun Cloudflare wajib diisi." }
+        }
+        val cv = ContentValues().apply {
+            put("name", name.trim())
+            if (cleanToken != null) {
+                put("token", cleanToken)
+                if (accountId != null) put("account_id", accountId.trim())
+                if (accountName != null) put("account_name", accountName.trim())
+            }
+        }
+        db.update("cf_accounts", cv, "id = ?", arrayOf(id.toString()))
+        getCfAccount(id)?.toOut()
+    }
+
+    override fun deleteCfAccount(id: Int): Boolean = synchronized(lock) {
+        db.delete("cf_accounts", "id = ?", arrayOf(id.toString())) > 0
+    }
+
     private fun readServerOut(c: android.database.Cursor): ServerOut {
         return ServerOut(
             id = c.getInt(c.getColumnIndexOrThrow("id")),
@@ -422,10 +490,54 @@ class Store(dbFile: File, key: ByteArray) : StoreBackend {
         )
     }
 
+    private fun readCfAccountOut(c: android.database.Cursor): CFAccountOut {
+        val token = c.getString(c.getColumnIndexOrThrow("token"))
+        return CFAccountOut(
+            id = c.getInt(c.getColumnIndexOrThrow("id")),
+            name = c.getString(c.getColumnIndexOrThrow("name")),
+            tokenMasked = maskCfToken(token),
+            accountId = c.getString(c.getColumnIndexOrThrow("account_id")),
+            accountName = c.getString(c.getColumnIndexOrThrow("account_name")),
+            createdAt = c.getString(c.getColumnIndexOrThrow("created_at"))
+        )
+    }
+
+    private fun readCfAccountWithSecret(c: android.database.Cursor): CFAccountWithSecret {
+        val token = c.getString(c.getColumnIndexOrThrow("token"))
+        return CFAccountWithSecret(
+            id = c.getInt(c.getColumnIndexOrThrow("id")),
+            name = c.getString(c.getColumnIndexOrThrow("name")),
+            token = token,
+            tokenMasked = maskCfToken(token),
+            accountId = c.getString(c.getColumnIndexOrThrow("account_id")),
+            accountName = c.getString(c.getColumnIndexOrThrow("account_name")),
+            createdAt = c.getString(c.getColumnIndexOrThrow("created_at"))
+        )
+    }
+
     private fun android.database.Cursor.getStringOrNull(col: String): String? {
         val idx = getColumnIndexOrThrow(col)
         return if (isNull(idx)) null else getString(idx)
     }
+}
+
+fun CFAccountWithSecret.toOut() = CFAccountOut(
+    id = id,
+    name = name,
+    tokenMasked = tokenMasked,
+    accountId = accountId,
+    accountName = accountName,
+    createdAt = createdAt
+)
+
+fun maskCfToken(token: String): String {
+    if (token.length <= 10) return "******"
+    return "${token.take(5)}...${token.takeLast(4)}"
+}
+
+fun validateCfAccountIn(name: String, token: String) {
+    require(name.isNotBlank() && name.length <= 100) { "Nama akun Cloudflare wajib diisi (maks 100 karakter)." }
+    require(token.isNotBlank() && token.length in 10..255) { "Token Cloudflare harus antara 10 dan 255 karakter." }
 }
 
 fun validateServerIn(data: ServerIn) {

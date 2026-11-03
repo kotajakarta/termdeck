@@ -15,5 +15,5 @@ def data_dir() -> Path:
 
 
 def initial_pin() -> str:
-    """PIN that creates the encrypted database on first start (change it in the app afterwards)."""
-    return os.environ.get("TERMDECK_PIN", "7821724")
+    """Optional PIN to initialize the vault non-interactively (e.g. CI or headless containers)."""
+    return os.environ.get("TERMDECK_PIN", "")

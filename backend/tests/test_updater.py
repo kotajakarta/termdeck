@@ -38,7 +38,8 @@ async def test_apply_update_success(monkeypatch):
     
     res = await updater.apply_update()
     assert res["started"] is True
-    assert "selesai" in res["message"].lower() or "berhasil" in res["message"].lower()
+    if updater._update_task:
+        await updater._update_task
 
     progress = updater.get_progress()
     assert progress["state"] == "completed"
@@ -49,8 +50,11 @@ async def test_apply_update_git_failure(monkeypatch):
     updater = DesktopUpdater(repo_dir=Path(__file__).parents[2])
     monkeypatch.setattr(updater, "_run_git_pull", lambda: (False, "fatal: Not possible to fast-forward"))
     
-    with pytest.raises(RuntimeError, match="fast-forward"):
-        await updater.apply_update()
+    res = await updater.apply_update()
+    assert res["started"] is True
+    if updater._update_task:
+        await updater._update_task
 
     progress = updater.get_progress()
     assert progress["state"] == "error"
+    assert "fatal" in progress["message"]

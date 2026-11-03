@@ -9,10 +9,15 @@ from app.main import create_app
 from app.vault import Vault
 
 TOKEN = "test-token"
-PIN = "7821724"
+PIN = "246810"
 
 
 def _login(client: TestClient, pin: str = PIN) -> str:
+    status = client.get("/api/auth/status").json()
+    if not status.get("initialized"):
+        res = client.post("/api/auth/setup-pin", json={"pin": pin})
+        assert res.status_code == 200, res.text
+        return res.json()["session"]
     res = client.post("/api/auth/login", json={"pin": pin})
     assert res.status_code == 200, res.text
     return res.json()["session"]

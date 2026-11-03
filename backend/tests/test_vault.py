@@ -6,7 +6,7 @@ import pytest
 from app.crypto import SecretBox
 from app.vault import InvalidPin, TooManyAttempts, Vault
 
-PIN = "7821724"
+PIN = "246810"
 
 
 class FakeClock:
@@ -123,3 +123,62 @@ def test_migrates_legacy_plaintext_database(tmp_path: Path, vault: Vault) -> Non
     assert [s.command for s in store.list_snippets()] == ["git pull"]
     assert not (tmp_path / "termdeck.db").exists()
     assert (tmp_path / "termdeck.db.migrated").exists()
+
+
+def test_setup_pin_creates_vault(tmp_path: Path, clock: FakeClock) -> None:
+    v = Vault(tmp_path, clock=clock)
+    assert not v.is_initialized
+    assert not v.unlocked
+    session = v.setup_pin("123456")
+    assert v.is_initialized
+    assert v.unlocked
+    assert v.check_session(session)
+    assert not v.needs_pin_change(session)
+
+
+def test_setup_pin_rejects_default_pin(tmp_path: Path, clock: FakeClock) -> None:
+    v = Vault(tmp_path, clock=clock)
+    with pytest.raises(ValueError, match="PIN default"):
+        v.setup_pin("7821724")
+
+
+def test_setup_pin_fails_if_already_initialized(tmp_path: Path, clock: FakeClock) -> None:
+    v = Vault(tmp_path, clock=clock)
+    v.setup_pin("123456")
+    with pytest.raises(RuntimeError, match="sudah diinisialisasi"):
+        v.setup_pin("654321")
+
+
+def test_unlock_uninitialized_fails(tmp_path: Path, clock: FakeClock) -> None:
+    v = Vault(tmp_path, clock=clock)
+    with pytest.raises(InvalidPin, match="belum diinisialisasi"):
+        v.unlock("123456")
+
+
+async def test_unlock_with_default_pin_flags_must_change(tmp_path: Path, clock: FakeClock) -> None:
+    # Simulate an existing database created with legacy default pin 7821724
+    v = Vault(tmp_path, clock=clock)
+    key = v._derive("7821724")
+    v._open(key)
+    await v.lock()
+    fresh = Vault(tmp_path, clock=clock)
+    session = fresh.unlock("7821724")
+    assert fresh.needs_pin_change(session) is True
+
+
+async def test_change_pin_revokes_other_sessions_and_clears_flag(tmp_path: Path, clock: FakeClock) -> None:
+    v = Vault(tmp_path, clock=clock)
+    key = v._derive("7821724")
+    v._open(key)
+    await v.lock()
+    fresh = Vault(tmp_path, clock=clock)
+    session1 = fresh.unlock("7821724")
+    session2 = fresh.unlock("7821724")
+    assert fresh.needs_pin_change(session1) is True
+    assert fresh.needs_pin_change(session2) is True
+
+    fresh.change_pin("7821724", "987654", current_session=session1)
+    assert fresh.needs_pin_change(session1) is False
+    assert fresh.check_session(session1) is True
+    assert fresh.check_session(session2) is False  # Other session revoked!
+

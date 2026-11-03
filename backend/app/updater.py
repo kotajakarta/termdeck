@@ -26,6 +26,7 @@ class DesktopUpdater:
         self._state: str = "idle"  # idle | downloading | ready | completed | error
         self._progress_percent: int = 0
         self._message: str = ""
+        self._update_task: asyncio.Task[None] | None = None
 
     def get_current_version(self) -> str:
         try:
@@ -141,33 +142,49 @@ class DesktopUpdater:
             "message": self._message,
         }
 
+    async def _do_apply(self) -> None:
+        try:
+            self._state = "downloading"
+            self._progress_percent = 20
+            self._message = "Menarik pembaruan dari git origin/master..."
+
+            ok, pull_msg = await asyncio.to_thread(self._run_git_pull)
+            if not ok:
+                self._state = "error"
+                self._message = f"Gagal git pull: {pull_msg}"
+                return
+
+            self._progress_percent = 60
+            self._message = "Mengompilasi asset frontend (npm run build)..."
+
+            ok_build, build_msg = await asyncio.to_thread(self._run_frontend_build)
+            if not ok_build:
+                self._state = "error"
+                self._message = f"Gagal build frontend: {build_msg}"
+                return
+
+            self._state = "completed"
+            self._progress_percent = 100
+            self._message = "Pembaruan berhasil diterapkan. Silakan restart TermDeck (./run.sh) untuk memuat perubahan backend."
+        except Exception as exc:
+            self._state = "error"
+            self._message = f"Kesalahan saat pembaruan: {exc}"
+
     async def apply_update(self) -> dict[str, Any]:
+        if self._state == "downloading" and self._update_task and not self._update_task.done():
+            return {
+                "started": True,
+                "message": "Pembaruan sedang berjalan di latar belakang...",
+            }
+
         self._state = "downloading"
-        self._progress_percent = 20
-        self._message = "Menarik pembaruan dari git origin/master..."
-
-        ok, pull_msg = await asyncio.to_thread(self._run_git_pull)
-        if not ok:
-            self._state = "error"
-            self._message = f"Gagal git pull: {pull_msg}"
-            raise RuntimeError(self._message)
-
-        self._progress_percent = 60
-        self._message = "Mengompilasi asset frontend (npm run build)..."
-
-        ok_build, build_msg = await asyncio.to_thread(self._run_frontend_build)
-        if not ok_build:
-            self._state = "error"
-            self._message = f"Gagal build frontend: {build_msg}"
-            raise RuntimeError(self._message)
-
-        self._state = "completed"
-        self._progress_percent = 100
-        self._message = "Pembaruan berhasil diterapkan. Silakan restart TermDeck (./run.sh) untuk memuat perubahan backend."
+        self._progress_percent = 10
+        self._message = "Memulai proses pembaruan..."
+        self._update_task = asyncio.create_task(self._do_apply())
 
         return {
             "started": True,
-            "message": self._message,
+            "message": "Pembaruan dimulai di latar belakang.",
         }
 
 
@@ -190,10 +207,7 @@ def register_updater_routes(router: APIRouter, unlocked_dep: Any) -> None:
 
     @router.post("/system/update-apply")
     async def update_apply(_: Any = Depends(unlocked_dep)) -> dict[str, Any]:
-        try:
-            return await updater.apply_update()
-        except RuntimeError as exc:
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+        return await updater.apply_update()
 
     @router.get("/system/update-progress")
     async def update_progress(_: Any = Depends(unlocked_dep)) -> dict[str, Any]:

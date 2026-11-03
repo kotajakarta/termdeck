@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -79,12 +80,12 @@ class AndroidUpdater(val context: Context) {
         }
     }
 
-    suspend fun checkUpdate(): UpdateCheckResult {
+    suspend fun checkUpdate(): UpdateCheckResult = withContext(Dispatchers.IO) {
         val currentVersion = runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
         }.getOrDefault("1.0.0")
 
-        return try {
+        try {
             val url = URL(GITHUB_LATEST_RELEASE_URL)
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -115,6 +116,16 @@ class AndroidUpdater(val context: Context) {
                     release_notes = releaseNotes,
                     download_url = apkAsset?.first
                 )
+            } else if (responseCode == 403) {
+                UpdateCheckResult(
+                    platform = "android",
+                    current_version = currentVersion,
+                    latest_version = currentVersion,
+                    has_update = false,
+                    release_title = "Batas Kuota GitHub Tercapai",
+                    release_notes = "Batas kuota publik GitHub API tercapai (HTTP 403). Silakan coba lagi beberapa saat lagi.",
+                    download_url = null
+                )
             } else {
                 UpdateCheckResult(
                     platform = "android",
@@ -140,6 +151,17 @@ class AndroidUpdater(val context: Context) {
     }
 
     fun startDownload(apkUrl: String) {
+        val updatesDir = File(context.cacheDir, "updates")
+        val targetFile = File(updatesDir, "termdeck-update.apk")
+        if (targetFile.exists() && targetFile.length() > 0) {
+            cachedApkFile = targetFile
+            progressPercent = 100
+            state = "ready"
+            message = "File APK pembaruan siap dipasang. Membuka installer..."
+            installApk()
+            return
+        }
+
         if (state == "downloading") return
 
         state = "downloading"
@@ -150,10 +172,7 @@ class AndroidUpdater(val context: Context) {
 
         scope.launch {
             try {
-                val updatesDir = File(context.cacheDir, "updates")
                 if (!updatesDir.exists()) updatesDir.mkdirs()
-
-                val targetFile = File(updatesDir, "termdeck-update.apk")
                 if (targetFile.exists()) targetFile.delete()
 
                 var currentUrl = apkUrl
@@ -232,7 +251,7 @@ class AndroidUpdater(val context: Context) {
             val pm = context.packageManager
             if (!pm.canRequestPackageInstalls()) {
                 state = "ready"
-                message = "Mohon aktifkan izin 'Instal aplikasi tidak dikenal' untuk TermDeck di Pengaturan."
+                message = "Izin pasang aplikasi tidak dikenal diperlukan. Mohon aktifkan di Pengaturan, lalu klik tombol 'Pasang APK'."
                 val manageIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
                     data = Uri.parse("package:${context.packageName}")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, errorMessage } from "../api";
 import { Icon } from "./Icon";
 
-export function LockScreen({ onUnlocked }: { onUnlocked: () => void }) {
+export function LockScreen({ onUnlocked }: { onUnlocked: (mustChangePin?: boolean) => void }) {
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,8 +19,8 @@ export function LockScreen({ onUnlocked }: { onUnlocked: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      await api.login(pin);
-      onUnlocked();
+      const res = await api.login(pin);
+      onUnlocked(res?.must_change_pin);
     } catch (err) {
       setError(errorMessage(err));
       setPin("");

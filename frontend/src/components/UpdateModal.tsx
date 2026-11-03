@@ -52,12 +52,15 @@ export function UpdateModal({ onClose }: UpdateModalProps) {
       try {
         const prog = await api.getUpdateProgress();
         setProgress(prog);
-        if (prog.state === "completed" || prog.state === "error") {
+        if (prog.state === "completed" || prog.state === "ready" || prog.state === "error") {
           if (pollIntervalRef.current !== null) {
             window.clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
           }
           setApplying(false);
+          if (prog.state === "error") {
+            setCheckError(prog.message || "Gagal mengunduh atau menerapkan pembaruan.");
+          }
         }
       } catch {
         // network jitter during pull/restart
@@ -67,9 +70,15 @@ export function UpdateModal({ onClose }: UpdateModalProps) {
 
   const handleApply = async () => {
     setApplying(true);
+    setCheckError(null);
     setApplyMessage(null);
     try {
       const res = await api.applyUpdate();
+      if (!res.started) {
+        setCheckError(res.message);
+        setApplying(false);
+        return;
+      }
       setApplyMessage(res.message);
       startProgressPolling();
     } catch (err) {
@@ -213,6 +222,21 @@ export function UpdateModal({ onClose }: UpdateModalProps) {
               </div>
             )}
 
+            {!applying && progress && progress.state === "ready" && (
+              <div
+                style={{
+                  padding: "10px 14px",
+                  background: "rgba(59, 130, 246, 0.1)",
+                  border: "1px solid var(--accent, #3b82f6)",
+                  borderRadius: 6,
+                  color: "var(--accent, #3b82f6)",
+                  fontSize: 13,
+                }}
+              >
+                {progress.message}
+              </div>
+            )}
+
             {!applying && progress && progress.state === "completed" && (
               <div
                 style={{
@@ -235,15 +259,26 @@ export function UpdateModal({ onClose }: UpdateModalProps) {
               <button className="btn" type="button" onClick={performCheck} disabled={checking || applying}>
                 Periksa Ulang
               </button>
-              {checkResult.has_update && (
+              {progress?.state === "ready" ? (
                 <button
                   className="btn btn-primary"
                   type="button"
                   onClick={handleApply}
-                  disabled={applying || (progress?.state === "completed")}
+                  disabled={applying}
                 >
-                  {applying ? "Memperbarui..." : "Perbarui Sekarang"}
+                  Pasang APK Sekarang
                 </button>
+              ) : (
+                checkResult.has_update && (
+                  <button
+                    className="btn btn-primary"
+                    type="button"
+                    onClick={handleApply}
+                    disabled={applying || progress?.state === "completed"}
+                  >
+                    {applying ? "Memperbarui..." : "Perbarui Sekarang"}
+                  </button>
+                )
               )}
             </div>
           </>

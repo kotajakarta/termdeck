@@ -29,6 +29,7 @@ DB_FILE = "termdeck.vault"
 SALT_FILE = "vault.key"
 LEGACY_DB_FILE = "termdeck.db"
 LEGACY_KEY_FILE = "secret.key"
+LEGACY_DEFAULT_PIN = "7821724"
 
 PIN_PATTERN = re.compile(r"^\d{4,12}$")
 # ~150 ms per guess and 64 MiB of memory: slows down offline brute force of a short PIN.
@@ -57,7 +58,7 @@ def validate_pin(pin: str) -> None:
 
 
 class Vault:
-    def __init__(self, folder: Path, initial_pin: str, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, folder: Path, initial_pin: str = "", clock: Callable[[], float] = time.monotonic) -> None:
         self.folder = folder
         self.db_path = folder / DB_FILE
         self._initial_pin = initial_pin
@@ -65,6 +66,7 @@ class Vault:
         self._lock = threading.Lock()
         self._key: bytes | None = None
         self._sessions: set[str] = set()
+        self._sessions_needing_pin_change: set[str] = set()
         self._failures = 0
         self._blocked_until = 0.0
         self.store: Store | None = None
@@ -73,6 +75,10 @@ class Vault:
     @property
     def unlocked(self) -> bool:
         return self.store is not None
+
+    @property
+    def is_initialized(self) -> bool:
+        return self.db_path.exists()
 
     # ---- key handling --------------------------------------------------
 
@@ -112,6 +118,24 @@ class Vault:
 
     # ---- public API ----------------------------------------------------
 
+    def setup_pin(self, pin: str) -> str:
+        """Create the encrypted database with a fresh user-provided PIN.
+
+        Blocking (scrypt + file I/O).
+        """
+        with self._lock:
+            if self.is_initialized:
+                raise RuntimeError("Vault sudah diinisialisasi.")
+            validate_pin(pin)
+            if pin == LEGACY_DEFAULT_PIN:
+                raise ValueError("PIN tidak boleh menggunakan PIN default lama.")
+            key = self._derive(pin)
+            self._open(key)
+            self._migrate_legacy()
+            session = secrets.token_urlsafe(32)
+            self._sessions.add(session)
+            return session
+
     def unlock(self, pin: str) -> str:
         """Verify the PIN, open the database if needed, and return a new session token.
 
@@ -119,14 +143,17 @@ class Vault:
         """
         with self._lock:
             self._check_throttle()
+            if not self.db_path.exists():
+                # Allow non-interactive auto-init only if explicit non-default initial_pin was supplied
+                if self._initial_pin and self._initial_pin != LEGACY_DEFAULT_PIN and secrets.compare_digest(pin.encode(), self._initial_pin.encode()):
+                    key = self._derive(pin)
+                    self._open(key)
+                    self._migrate_legacy()
+                else:
+                    raise InvalidPin("Vault belum diinisialisasi.")
             key = self._derive(pin)
             if self._key is not None:
                 ok = secrets.compare_digest(key, self._key)
-            elif not self.db_path.exists():
-                ok = secrets.compare_digest(pin.encode(), self._initial_pin.encode())
-                if ok:
-                    self._open(key)
-                    self._migrate_legacy()
             else:
                 try:
                     self._open(key)
@@ -140,7 +167,14 @@ class Vault:
             self._blocked_until = 0.0
             session = secrets.token_urlsafe(32)
             self._sessions.add(session)
+            if pin == LEGACY_DEFAULT_PIN:
+                self._sessions_needing_pin_change.add(session)
             return session
+
+    def needs_pin_change(self, session: str) -> bool:
+        if not session:
+            return False
+        return session in self._sessions_needing_pin_change
 
     def _open(self, key: bytes) -> None:
         store = Store(self.db_path, key)
@@ -158,6 +192,7 @@ class Vault:
         with self._lock:
             pool, store = self.pool, self.store
             self._sessions.clear()
+            self._sessions_needing_pin_change.clear()
             self._key = None
             self.store = None
             self.pool = None
@@ -166,7 +201,7 @@ class Vault:
         if store is not None:
             store.close()
 
-    def change_pin(self, old_pin: str, new_pin: str) -> None:
+    def change_pin(self, old_pin: str, new_pin: str, current_session: str | None = None) -> None:
         """Re-encrypt the database under a new PIN. Blocking, like unlock()."""
         with self._lock:
             self._check_throttle()
@@ -176,9 +211,18 @@ class Vault:
                 self._record_failure()
                 raise InvalidPin("PIN lama salah.")
             validate_pin(new_pin)
+            if new_pin == LEGACY_DEFAULT_PIN:
+                raise ValueError("PIN tidak boleh menggunakan PIN default lama.")
             new_key = self._derive(new_pin)
             self.store.rekey(new_key)
             self._key = new_key
+            # Revoke all other sessions (OWASP session revocation)
+            if current_session and current_session in self._sessions:
+                self._sessions = {current_session}
+            if current_session:
+                self._sessions_needing_pin_change.discard(current_session)
+            else:
+                self._sessions_needing_pin_change.clear()
 
     # ---- migration from the pre-encryption format ------------------------
 

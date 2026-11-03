@@ -13,13 +13,19 @@ from app.main import create_app
 from app.vault import Vault
 
 TOKEN = "test-token"
-PIN = "7821724"
+PIN = "246810"
 
 
 def _login(client: TestClient, pin: str = PIN) -> str:
+    status = client.get("/api/auth/status").json()
+    if not status.get("initialized"):
+        res = client.post("/api/auth/setup-pin", json={"pin": pin})
+        assert res.status_code == 200, res.text
+        session: str = res.json()["session"]
+        return session
     res = client.post("/api/auth/login", json={"pin": pin})
     assert res.status_code == 200, res.text
-    session: str = res.json()["session"]
+    session = res.json()["session"]
     return session
 
 
@@ -45,7 +51,7 @@ def test_requires_pin_session(client: TestClient) -> None:
     assert client.get("/api/servers", headers={"X-Session": ""}).status_code == 401
     assert client.get("/api/servers", headers={"X-Session": "forged"}).status_code == 401
     status = client.get("/api/auth/status").json()
-    assert status == {"unlocked": True, "session_valid": True}
+    assert status == {"unlocked": True, "session_valid": True, "initialized": True, "must_change_pin": False}
 
 
 def test_wrong_pin_rejected(client: TestClient) -> None:
@@ -58,7 +64,12 @@ def test_lock_ends_all_sessions(client: TestClient) -> None:
     assert client.post("/api/auth/lock").status_code == 204
     assert client.get("/api/servers").status_code == 401
     assert client.get("/api/servers", headers={"X-Session": other}).status_code == 401
-    assert client.get("/api/auth/status").json() == {"unlocked": False, "session_valid": False}
+    assert client.get("/api/auth/status").json() == {
+        "unlocked": False,
+        "session_valid": False,
+        "initialized": True,
+        "must_change_pin": False,
+    }
     client.headers["X-Session"] = _login(client)
     assert client.get("/api/servers").status_code == 200
 
@@ -69,7 +80,12 @@ def test_lock_all_with_token_only(client: TestClient) -> None:
     assert client.get("/api/servers").status_code == 200
     assert client.post("/api/auth/lock-all", headers={"X-Session": ""}).status_code == 204
     assert client.get("/api/servers").status_code == 401
-    assert client.get("/api/auth/status").json() == {"unlocked": False, "session_valid": False}
+    assert client.get("/api/auth/status").json() == {
+        "unlocked": False,
+        "session_valid": False,
+        "initialized": True,
+        "must_change_pin": False,
+    }
     # Locking an already locked vault is harmless.
     assert client.post("/api/auth/lock-all", headers={"X-Session": ""}).status_code == 204
     client.headers["X-Session"] = _login(client)
@@ -86,6 +102,100 @@ def test_change_pin_via_api(client: TestClient) -> None:
     client.post("/api/auth/lock")
     assert client.post("/api/auth/login", json={"pin": PIN}).status_code == 403
     _login(client, "123456")
+
+
+def test_auth_status_reports_uninitialized(tmp_path: Path) -> None:
+    app = create_app(Vault(tmp_path), TOKEN, static_dir=None)
+    raw_client = TestClient(app, headers={"X-Token": TOKEN})
+    status = raw_client.get("/api/auth/status").json()
+    assert status == {
+        "unlocked": False,
+        "session_valid": False,
+        "initialized": False,
+        "must_change_pin": False,
+    }
+
+
+def test_setup_pin_via_api(tmp_path: Path) -> None:
+    app = create_app(Vault(tmp_path), TOKEN, static_dir=None)
+    raw_client = TestClient(app, headers={"X-Token": TOKEN})
+    # Cannot login yet
+    res = raw_client.post("/api/auth/login", json={"pin": "123456"})
+    assert res.status_code == 400
+    assert "belum diinisialisasi" in res.json()["detail"]
+
+    # Reject legacy default pin
+    bad = raw_client.post("/api/auth/setup-pin", json={"pin": "7821724"})
+    assert bad.status_code == 422
+    assert "PIN default" in bad.json()["detail"]
+
+    # Setup with valid pin
+    ok = raw_client.post("/api/auth/setup-pin", json={"pin": "123456"})
+    assert ok.status_code == 200
+    session = ok.json()["session"]
+    assert ok.json()["must_change_pin"] is False
+
+    # Vault is now initialized
+    status = raw_client.get("/api/auth/status", headers={"X-Session": session}).json()
+    assert status == {
+        "unlocked": True,
+        "session_valid": True,
+        "initialized": True,
+        "must_change_pin": False,
+    }
+
+    # Second setup call rejected
+    dup = raw_client.post("/api/auth/setup-pin", json={"pin": "654321"})
+    assert dup.status_code == 400
+
+
+def test_must_change_pin_flow_blocks_sensitive_endpoints(tmp_path: Path) -> None:
+    # Simulate existing vault with legacy default pin 7821724
+    v = Vault(tmp_path)
+    key = v._derive("7821724")
+    v._open(key)
+    # create a sample server
+    from app.schemas import ServerIn
+    v.store.create_server(ServerIn(name="s1", host="1.1.1.1", username="u"))
+    # close vault
+    v.store.close()
+    v.store = None
+    v._key = None
+
+    app = create_app(Vault(tmp_path), TOKEN, static_dir=None)
+    client = TestClient(app, headers={"X-Token": TOKEN})
+
+    # Login with 7821724
+    login_res = client.post("/api/auth/login", json={"pin": "7821724"})
+    assert login_res.status_code == 200
+    session = login_res.json()["session"]
+    assert login_res.json()["must_change_pin"] is True
+
+    # Status shows must_change_pin == True
+    status = client.get("/api/auth/status", headers={"X-Session": session}).json()
+    assert status["must_change_pin"] is True
+
+    # Attempting to access sensitive endpoints yields 403 Forbidden
+    servers_res = client.get("/api/servers", headers={"X-Session": session})
+    assert servers_res.status_code == 403
+    assert "Wajib mengganti PIN" in servers_res.json()["detail"]
+
+    # Changing pin with new PIN != 7821724
+    change_res = client.post(
+        "/api/auth/change-pin",
+        headers={"X-Session": session},
+        json={"old_pin": "7821724", "new_pin": "999888"},
+    )
+    assert change_res.status_code == 204
+
+    # Now status shows must_change_pin == False
+    status_after = client.get("/api/auth/status", headers={"X-Session": session}).json()
+    assert status_after["must_change_pin"] is False
+
+    # Sensitive endpoints are now accessible
+    servers_after = client.get("/api/servers", headers={"X-Session": session})
+    assert servers_after.status_code == 200
+    assert len(servers_after.json()) == 1
 
 
 def test_server_crud_via_api(client: TestClient) -> None:

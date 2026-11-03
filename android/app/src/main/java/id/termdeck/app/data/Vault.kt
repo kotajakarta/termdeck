@@ -23,6 +23,7 @@ class Vault(
     private val throttle = PinThrottle(clock)
     private var key: ByteArray? = null
     private val sessions = mutableSetOf<String>()
+    private val sessionsNeedingPinChange = mutableSetOf<String>()
 
     @Volatile
     var store: StoreBackend? = null
@@ -34,6 +35,9 @@ class Vault(
 
     val unlocked: Boolean
         get() = store != null
+
+    val isInitialized: Boolean
+        get() = dbFile.exists() && dbFile.length() > 0L
 
     private fun getOrCreateSalt(): ByteArray {
         folder.mkdirs()
@@ -50,6 +54,20 @@ class Vault(
         return deriveVaultKey(pin, getOrCreateSalt())
     }
 
+    fun setupPin(pin: String): String {
+        synchronized(lockObj) {
+            if (isInitialized) {
+                throw IllegalStateException("Vault sudah diinisialisasi.")
+            }
+            validateNewPin(pin)
+            val derived = derive(pin)
+            openInternal(derived)
+            val session = generateRandomToken(32)
+            sessions.add(session)
+            return session
+        }
+    }
+
     fun unlock(pin: String): String {
         synchronized(lockObj) {
             throttle.check()
@@ -58,17 +76,18 @@ class Vault(
             val ok = if (currentKey != null) {
                 MessageDigest.isEqual(derived, currentKey)
             } else if (!dbFile.exists() || dbFile.length() == 0L) {
-                if (dbFile.exists() && dbFile.length() == 0L) {
-                    dbFile.delete()
+                if (initialPin != DEFAULT_INITIAL_PIN && initialPin.isNotBlank()) {
+                    val match = MessageDigest.isEqual(
+                        pin.toByteArray(Charsets.UTF_8),
+                        initialPin.toByteArray(Charsets.UTF_8)
+                    )
+                    if (match) {
+                        openInternal(derived)
+                    }
+                    match
+                } else {
+                    throw InvalidPinException("Vault belum diinisialisasi.")
                 }
-                val match = MessageDigest.isEqual(
-                    pin.toByteArray(Charsets.UTF_8),
-                    initialPin.toByteArray(Charsets.UTF_8)
-                )
-                if (match) {
-                    openInternal(derived)
-                }
-                match
             } else {
                 try {
                     openInternal(derived)
@@ -86,7 +105,20 @@ class Vault(
             throttle.reset()
             val session = generateRandomToken(32)
             sessions.add(session)
+            if (pin == DEFAULT_INITIAL_PIN) {
+                sessionsNeedingPinChange.add(session)
+            }
             return session
+        }
+    }
+
+    fun needsPinChange(session: String?): Boolean {
+        if (session.isNullOrEmpty()) return false
+        synchronized(lockObj) {
+            val target = session.toByteArray(Charsets.UTF_8)
+            return sessionsNeedingPinChange.any { known ->
+                MessageDigest.isEqual(target, known.toByteArray(Charsets.UTF_8))
+            }
         }
     }
 
@@ -114,6 +146,7 @@ class Vault(
             oldPool = pool
             oldStore = store
             sessions.clear()
+            sessionsNeedingPinChange.clear()
             key = null
             store = null
             pool = null
@@ -122,7 +155,7 @@ class Vault(
         oldStore?.close()
     }
 
-    fun changePin(oldPin: String, newPin: String) {
+    fun changePin(oldPin: String, newPin: String, currentSession: String? = null) {
         synchronized(lockObj) {
             throttle.check()
             val currentStore = store
@@ -134,10 +167,17 @@ class Vault(
                 throttle.recordFailure()
                 throw InvalidPinException("PIN lama salah.")
             }
-            validatePin(newPin)
+            validateNewPin(newPin)
             val newKey = derive(newPin)
             currentStore.rekey(newKey)
             key = newKey
+            if (currentSession != null && sessions.contains(currentSession)) {
+                sessions.clear()
+                sessions.add(currentSession)
+                sessionsNeedingPinChange.remove(currentSession)
+            } else {
+                sessionsNeedingPinChange.clear()
+            }
         }
     }
 }
