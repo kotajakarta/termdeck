@@ -170,13 +170,19 @@ data class PastedImage(
 )
 
 @Serializable
+data class SetupPinIn(
+    val pin: String
+)
+
+@Serializable
 data class LoginIn(
     val pin: String
 )
 
 @Serializable
 data class LoginOut(
-    val session: String
+    val session: String,
+    @SerialName("must_change_pin") val mustChangePin: Boolean = false
 )
 
 @Serializable
@@ -188,7 +194,9 @@ data class ChangePinIn(
 @Serializable
 data class AuthStatus(
     val unlocked: Boolean,
-    @SerialName("session_valid") val sessionValid: Boolean
+    @SerialName("session_valid") val sessionValid: Boolean,
+    val initialized: Boolean = true,
+    @SerialName("must_change_pin") val mustChangePin: Boolean = false
 )
 
 @Serializable
@@ -200,3 +208,74 @@ data class ServerOrderIn(
 data class ErrorDetail(
     val detail: String
 )
+
+@Serializable
+data class CFAccountIn(
+    val name: String,
+    val token: String
+)
+
+@Serializable
+data class CFAccountUpdateIn(
+    val name: String,
+    val token: String? = null
+)
+
+@Serializable
+data class CFAccountVerifyIn(
+    val token: String
+)
+
+@Serializable
+data class CFAccountOut(
+    val id: Int,
+    val name: String,
+    @SerialName("token_masked") val tokenMasked: String,
+    @SerialName("account_id") val accountId: String,
+    @SerialName("account_name") val accountName: String,
+    @SerialName("created_at") val createdAt: String
+)
+
+data class CFAccountWithSecret(
+    val id: Int,
+    val name: String,
+    val token: String,
+    val tokenMasked: String,
+    val accountId: String,
+    val accountName: String,
+    val createdAt: String
+)
+
+@Serializable
+data class CFRouteIn(
+    val hostname: String,
+    val service: String,
+    @SerialName("zone_id") val zoneId: String? = null
+)
+
+@Serializable
+data class UpdateCheckResult(
+    val platform: String,
+    val current_version: String,
+    val latest_version: String,
+    val has_update: Boolean,
+    val release_title: String? = null,
+    val release_notes: String? = null,
+    val download_url: String? = null
+)
+
+@Serializable
+data class UpdateApplyResult(
+    val started: Boolean,
+    val message: String
+)
+
+@Serializable
+data class UpdateProgressResult(
+    val state: String,
+    val progress_percent: Int,
+    val downloaded_bytes: Long,
+    val total_bytes: Long,
+    val message: String
+)
+
