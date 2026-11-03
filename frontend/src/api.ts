@@ -36,6 +36,9 @@ import type {
   TransferDirection,
   TransferJob,
   TransferScan,
+  UpdateApplyResult,
+  UpdateCheckResult,
+  UpdateProgressResult,
 } from "./types";
 
 /** Session token: embedded in the page by the backend; `?token=` is the Vite dev-server fallback. */
@@ -125,7 +128,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     } catch {
       detail = null;
     }
-    if (res.status === 401 && path !== "/api/auth/login") {
+    if (res.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/setup-pin") {
       setSession("");
       unauthorizedHandler?.();
     }
@@ -137,9 +140,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   authStatus: () => request<AuthStatus>("GET", "/api/auth/status"),
-  login: async (pin: string) => {
-    const result = await request<{ session: string }>("POST", "/api/auth/login", { pin });
+  setupPin: async (pin: string) => {
+    const result = await request<{ session: string; must_change_pin?: boolean }>("POST", "/api/auth/setup-pin", { pin });
     setSession(result.session);
+    return result;
+  },
+  login: async (pin: string) => {
+    const result = await request<{ session: string; must_change_pin?: boolean }>("POST", "/api/auth/login", { pin });
+    setSession(result.session);
+    return result;
   },
   lock: async () => {
     try {
@@ -343,6 +352,9 @@ export const api = {
   },
   cfGetTunnelToken: (accountId: number, tunnelId: string) =>
     request<{ token: string }>("GET", `/api/cf/accounts/${accountId}/tunnels/${tunnelId}/token`),
+  checkUpdate: () => request<UpdateCheckResult>("GET", "/api/system/update-check"),
+  applyUpdate: () => request<UpdateApplyResult>("POST", "/api/system/update-apply"),
+  getUpdateProgress: () => request<UpdateProgressResult>("GET", "/api/system/update-progress"),
 };
 
 export function terminalSocketUrl(serverId: number, bookmarkId: number | null, cols: number, rows: number): string {

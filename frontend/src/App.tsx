@@ -44,6 +44,7 @@ import { Snippets } from "./components/Snippets";
 import { CloudflarePanel } from "./components/CloudflarePanel";
 import { TabBar } from "./components/TabBar";
 import { isAppShortcut, TerminalView, type Sender, type TerminalController } from "./components/TerminalView";
+import { UpdateModal } from "./components/UpdateModal";
 
 type Dialog =
   | { kind: "server"; server: Server | null }
@@ -53,6 +54,7 @@ type Dialog =
   | { kind: "jump"; tabId: string }
   | { kind: "change-pin" }
   | { kind: "backup" }
+  | { kind: "update" }
   | null;
 
 const LAYOUT_KEY = "termdeck.layout";
@@ -725,6 +727,15 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
           <button
             type="button"
             className="icon-btn"
+            onClick={() => setDialog({ kind: "update" })}
+            title="Pembaruan Aplikasi dari GitHub"
+            aria-label="Pembaruan Aplikasi"
+          >
+            <Icon name="refresh" size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
             onClick={() => setDialog({ kind: "change-pin" })}
             title="Ganti PIN"
             aria-label="Ganti PIN"
@@ -1232,6 +1243,7 @@ export function App({ onLock }: { onLock: () => Promise<void> }) {
           onImportSuccess={() => void reload()}
         />
       )}
+      {dialog?.kind === "update" && <UpdateModal onClose={() => setDialog(null)} />}
       {dialog?.kind === "palette" && (
         <CommandPalette
           servers={servers}

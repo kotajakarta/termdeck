@@ -247,6 +247,8 @@ export type ControlMessage =
 export interface AuthStatus {
   unlocked: boolean;
   session_valid: boolean;
+  initialized: boolean;
+  must_change_pin?: boolean;
 }
 
 export type ContainerEngineType = "podman" | "docker" | "none";
@@ -348,6 +350,29 @@ export interface CFRouteIn {
   hostname: string;
   service: string;
   zone_id?: string;
+}
+
+export interface UpdateCheckResult {
+  platform: "desktop" | "android" | string;
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_title: string | null;
+  release_notes: string | null;
+  download_url: string | null;
+}
+
+export interface UpdateApplyResult {
+  started: boolean;
+  message: string;
+}
+
+export interface UpdateProgressResult {
+  state: "idle" | "downloading" | "ready" | "completed" | "error" | string;
+  progress_percent: number;
+  downloaded_bytes: number;
+  total_bytes: number;
+  message: string;
 }
 
 declare global {
